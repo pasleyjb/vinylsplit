@@ -1,15 +1,22 @@
 import typer
-from rich import print
+
+from vinylsplit.audio import inspect_file
 
 app = typer.Typer(
-    help="Split full-album vinyl recordings into individual tagged tracks."
+    help="Split full-album vinyl recordings into individual tagged FLAC tracks."
 )
 
 
 @app.command()
+def inspect(filename: str) -> None:
+    """Inspect a FLAC file."""
+    inspect_file(filename)
+
+
+@app.command()
 def version() -> None:
-    """Display the VinylSplit version."""
-    print("[bold green]VinylSplit[/bold green] 0.1.0")
+    """Show the application version."""
+    print("VinylSplit 0.1.0")
 
 
 def main() -> None:

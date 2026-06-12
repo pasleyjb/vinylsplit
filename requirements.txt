@@ -1,0 +1,9 @@
+annotated-doc==0.0.4
+markdown-it-py==4.2.0
+mdurl==0.1.2
+mutagen==1.47.0
+Pygments==2.20.0
+rich==15.0.0
+shellingham==1.5.4
+typer==0.26.7
+-e git+ssh://git@github.com/pasleyjb/vinylsplit.git@bfe876160000bd32934a66ded0e3fee1e0527c64#egg=vinylsplit
