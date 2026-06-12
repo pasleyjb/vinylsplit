@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=80.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vinylsplit"
+version = "0.1.0"
+description = "Split full-album vinyl recordings into tagged FLAC tracks."
+readme = "README.md"
+requires-python = ">=3.14"
+authors = [
+    { name = "Justin Pasley" }
+]
+
+dependencies = [
+    "typer>=0.16",
+    "rich>=14.0"
+]
+
+[project.scripts]
+vinylsplit = "vinylsplit.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
