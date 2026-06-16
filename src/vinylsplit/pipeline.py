@@ -1,12 +1,15 @@
 from pathlib import Path
-from pathlib import Path
 
 from vinylsplit.audio import read_audio
+from vinylsplit.lookup import AlbumLookup, AlbumMatch
 from vinylsplit.models import AudioInfo
 
 
 class Pipeline:
     """Coordinates VinylSplit operations."""
+
+    def __init__(self) -> None:
+        self.lookup = AlbumLookup()
 
     def inspect(self, filename: str) -> AudioInfo:
         """Read information about an audio file."""
@@ -17,3 +20,8 @@ class Pipeline:
             raise FileNotFoundError(path)
 
         return read_audio(str(path))
+
+    def identify(self, filename: str) -> AlbumMatch:
+        """Identify an album."""
+
+        return self.lookup.identify(filename)

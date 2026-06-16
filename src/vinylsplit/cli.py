@@ -2,6 +2,12 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from vinylsplit.formatting import (
+    format_channels,
+    format_duration,
+    format_file_size,
+    format_sample_rate,
+)
 from vinylsplit.pipeline import Pipeline
 
 app = typer.Typer(
@@ -24,20 +30,32 @@ def inspect(filename: str) -> None:
 
     table.add_row("Filename", info.filename)
     table.add_row("Format", info.codec)
-    table.add_row("Sample Rate", f"{info.sample_rate:,} Hz")
-    table.add_row(
-        "Channels",
-        "Stereo" if info.channels == 2 else str(info.channels),
-    )
-    table.add_row("Duration", f"{info.duration:.2f} seconds")
+    table.add_row("Sample Rate", format_sample_rate(info.sample_rate))
+    table.add_row("Channels", format_channels(info.channels))
+    table.add_row("Duration", format_duration(info.duration))
 
     if info.bits_per_sample:
         table.add_row("Bit Depth", f"{info.bits_per_sample}-bit")
 
-    table.add_row(
-        "File Size",
-        f"{info.file_size / (1024 * 1024):.1f} MB",
-    )
+    table.add_row("File Size", format_file_size(info.file_size))
+
+    console.print(table)
+
+
+@app.command()
+def identify(filename: str) -> None:
+    """Identify an album."""
+
+    match = pipeline.identify(filename)
+
+    table = Table(title="Album Identification")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Artist", match.artist)
+    table.add_row("Album", match.album)
+    table.add_row("Year", match.year)
+    table.add_row("Confidence", f"{match.confidence:.0%}")
 
     console.print(table)
 
@@ -50,7 +68,6 @@ def version() -> None:
 
 
 def main() -> None:
-    """Application entry point."""
     app()
 
 
