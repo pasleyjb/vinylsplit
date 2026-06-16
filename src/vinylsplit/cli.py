@@ -61,6 +61,28 @@ def identify(filename: str) -> None:
 
 
 @app.command()
+def analyze(filename: str) -> None:
+    """Analyze an album recording."""
+
+    tracks = pipeline.analyze(filename)
+
+    table = Table(title="Track Analysis")
+    table.add_column("#", style="cyan")
+    table.add_column("Start Time", style="green")
+
+    for track in tracks:
+        minutes = int(track.start_time // 60)
+        seconds = int(track.start_time % 60)
+
+        table.add_row(
+            str(track.track_number),
+            f"{minutes:02}:{seconds:02}",
+        )
+
+    console.print(table)
+
+
+@app.command()
 def version() -> None:
     """Show the application version."""
 

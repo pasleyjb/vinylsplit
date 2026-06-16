@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 
-from vinylsplit.fingerprint import Fingerprinter
+from vinylsplit.fingerprint import Fingerprint
+from vinylsplit.services.acoustid import AcoustIDService
 
 
 @dataclass
 class AlbumMatch:
+    """Album identification result."""
+
     artist: str
     album: str
     year: str
@@ -12,20 +15,19 @@ class AlbumMatch:
 
 
 class AlbumLookup:
-    """Album identification service."""
+    """Identify albums from acoustic fingerprints."""
 
     def __init__(self) -> None:
-        self.fingerprinter = Fingerprinter()
+        self.acoustid = AcoustIDService()
 
-    def identify(self, filename: str) -> AlbumMatch:
-        fingerprint = self.fingerprinter.fingerprint(filename)
+    def identify(self, fingerprint: Fingerprint) -> AlbumMatch:
+        """Identify an album."""
 
-        # Prevent unused-variable warnings for now.
-        _ = fingerprint
+        result = self.acoustid.lookup(fingerprint)
 
         return AlbumMatch(
-            artist="Unknown Artist",
-            album="Unknown Album",
-            year="----",
-            confidence=0.0,
+            artist=result.artist,
+            album=result.album,
+            year=result.year,
+            confidence=result.score,
         )
