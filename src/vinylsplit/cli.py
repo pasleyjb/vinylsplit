@@ -5,7 +5,7 @@ from rich.table import Table
 from vinylsplit.pipeline import Pipeline
 
 app = typer.Typer(
-    help="Split full-album vinyl recordings into individual tagged FLAC tracks."
+    help="Inspect, identify, and process audio album recordings."
 )
 
 console = Console()
@@ -14,7 +14,7 @@ pipeline = Pipeline()
 
 @app.command()
 def inspect(filename: str) -> None:
-    """Inspect a FLAC file."""
+    """Inspect an audio file."""
 
     info = pipeline.inspect(filename)
 
@@ -23,9 +23,12 @@ def inspect(filename: str) -> None:
     table.add_column("Value", style="green")
 
     table.add_row("Filename", info.filename)
-    table.add_row("Codec", info.codec)
+    table.add_row("Format", info.codec)
     table.add_row("Sample Rate", f"{info.sample_rate:,} Hz")
-    table.add_row("Channels", "Stereo" if info.channels == 2 else str(info.channels))
+    table.add_row(
+        "Channels",
+        "Stereo" if info.channels == 2 else str(info.channels),
+    )
     table.add_row("Duration", f"{info.duration:.2f} seconds")
 
     if info.bits_per_sample:
@@ -33,7 +36,7 @@ def inspect(filename: str) -> None:
 
     table.add_row(
         "File Size",
-        f"{info.file_size / (1024 * 1024):.1f} MB"
+        f"{info.file_size / (1024 * 1024):.1f} MB",
     )
 
     console.print(table)

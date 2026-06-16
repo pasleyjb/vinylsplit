@@ -1,6 +1,7 @@
 from pathlib import Path
+from pathlib import Path
 
-from vinylsplit.audio import inspect_file
+from vinylsplit.audio import read_audio
 from vinylsplit.models import AudioInfo
 
 
@@ -15,4 +16,4 @@ class Pipeline:
         if not path.exists():
             raise FileNotFoundError(path)
 
-        return inspect_file(str(path))
+        return read_audio(str(path))

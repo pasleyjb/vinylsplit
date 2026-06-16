@@ -3,6 +3,8 @@ from dataclasses import dataclass
 
 @dataclass
 class AudioInfo:
+    """Information about an audio file."""
+
     filename: str
     codec: str
     sample_rate: int
