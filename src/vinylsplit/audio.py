@@ -2,27 +2,27 @@ from pathlib import Path
 
 from mutagen.flac import FLAC
 
+from vinylsplit.models import AudioInfo
 
-def inspect_file(filename: str) -> None:
-    """Display information about a FLAC file."""
+
+def inspect_file(filename: str) -> AudioInfo:
+    """Read information from a FLAC file."""
 
     path = Path(filename)
 
     if not path.exists():
-        print(f"File not found: {filename}")
-        return
+        raise FileNotFoundError(path)
 
     audio = FLAC(path)
-
     info = audio.info
 
-    print(f"File: {path.name}")
-    print(f"Sample Rate : {info.sample_rate}")
-    print(f"Channels    : {info.channels}")
-    print(f"Length      : {info.length:.2f} seconds")
-    print()
-
-    print("Tags")
-
-    for key, value in audio.tags.items():
-        print(f"{key}: {value}")
+    return AudioInfo(
+        filename=path.name,
+        codec="FLAC",
+        sample_rate=info.sample_rate,
+        channels=info.channels,
+        duration=info.length,
+        bits_per_sample=getattr(info, "bits_per_sample", None),
+        file_size=path.stat().st_size,
+        tags=dict(audio.tags),
+    )
