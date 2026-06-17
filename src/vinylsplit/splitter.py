@@ -10,6 +10,7 @@ from vinylsplit.detection import TrackBoundary
 class SplitTrack:
     """Represents an exported track."""
 
+    track_number: int
     path: Path
     start_time: float
     end_time: float
@@ -39,7 +40,6 @@ class TrackSplitter:
         output = Path(output_directory)
         output.mkdir(parents=True, exist_ok=True)
 
-        # Read the entire recording once
         audio, samplerate = sf.read(
             str(source),
             always_2d=False,
@@ -88,6 +88,7 @@ class TrackSplitter:
 
             tracks.append(
                 SplitTrack(
+                    track_number=boundary.track_number,
                     path=output_path,
                     start_time=start_time,
                     end_time=end_time,

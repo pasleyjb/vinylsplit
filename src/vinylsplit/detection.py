@@ -22,11 +22,13 @@ class TrackDetector:
         minimum_silence_seconds: float = 1.2,
         window_seconds: float = 0.05,
         smoothing_windows: int = 20,
+        boundary_offset_seconds: float = 0.50,
     ) -> None:
         self.silence_threshold = silence_threshold
         self.minimum_silence_seconds = minimum_silence_seconds
         self.window_seconds = window_seconds
         self.smoothing_windows = smoothing_windows
+        self.boundary_offset_seconds = boundary_offset_seconds
 
     def detect(self, filename: str) -> list[TrackBoundary]:
 
@@ -117,9 +119,9 @@ class TrackDetector:
 
                 if count >= minimum_windows:
 
-                    center = i - (count // 2)
+                    start = i - count 
 
-                    valleys.append(center)
+                    valleys.append(start)
 
                 count = 0
 
@@ -142,8 +144,11 @@ class TrackDetector:
 
         for valley in valleys:
 
-            start_time = valley * self.window_seconds
-
+            
+            start_time = (
+                valley * self.window_seconds
+                + self.boundary_offset_seconds
+            )
             # Ignore the needle drop
             if start_time < 10.0:
                 continue
