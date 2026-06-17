@@ -233,3 +233,5 @@ scratch.py
 # OS files
 .DS_Store
 Thumbs.db
+# VinylSplit output
+output/
