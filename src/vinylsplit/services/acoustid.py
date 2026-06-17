@@ -11,13 +11,14 @@ class AcoustIDResult:
     """Result returned from the AcoustID API."""
 
     score: float
+    recording_id: str
     artist: str
     album: str
     year: str
 
 
 class AcoustIDService:
-    """Look up albums using the AcoustID web service."""
+    """Look up recordings using the AcoustID web service."""
 
     URL = "https://api.acoustid.org/v2/lookup"
 
@@ -56,11 +57,15 @@ class AcoustIDService:
         artist = "Unknown Artist"
         album = "Unknown Album"
         year = "----"
+        recording_id = ""
 
         recordings = best.get("recordings", [])
 
         if recordings:
             recording = recordings[0]
+
+            # Save the MusicBrainz recording ID
+            recording_id = recording.get("id", "")
 
             artists = recording.get("artists", [])
             if artists:
@@ -78,6 +83,7 @@ class AcoustIDService:
 
         return AcoustIDResult(
             score=score,
+            recording_id=recording_id,
             artist=artist,
             album=album,
             year=year,

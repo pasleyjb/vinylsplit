@@ -44,7 +44,7 @@ def inspect(filename: str) -> None:
 
 @app.command()
 def identify(filename: str) -> None:
-    """Identify an album."""
+    """Identify an audio recording."""
 
     match = pipeline.identify(filename)
 
@@ -53,6 +53,7 @@ def identify(filename: str) -> None:
     table.add_column("Value", style="green")
 
     table.add_row("Artist", match.artist)
+    table.add_row("Title", match.title)
     table.add_row("Album", match.album)
     table.add_row("Year", match.year)
     table.add_row("Confidence", f"{match.confidence:.0%}")
@@ -80,50 +81,6 @@ def analyze(filename: str) -> None:
         )
 
     console.print(table)
-
-
-@app.command()
-def split(
-    filename: str,
-    output: str = "output",
-) -> None:
-    """Split an album recording into individual FLAC files."""
-
-    console.print("[bold cyan]Analyzing recording...[/bold cyan]")
-
-    tracks = pipeline.split(
-        filename=filename,
-        output_directory=output,
-    )
-
-    table = Table(title="Split Results")
-    table.add_column("#", style="cyan")
-    table.add_column("Filename", style="green")
-    table.add_column("Start", style="yellow")
-    table.add_column("End", style="magenta")
-
-    for index, track in enumerate(tracks, start=1):
-
-        start_minutes = int(track.start_time // 60)
-        start_seconds = int(track.start_time % 60)
-
-        end_minutes = int(track.end_time // 60)
-        end_seconds = int(track.end_time % 60)
-
-        table.add_row(
-            str(index),
-            track.path.name,
-            f"{start_minutes:02}:{start_seconds:02}",
-            f"{end_minutes:02}:{end_seconds:02}",
-        )
-
-    console.print(table)
-
-    console.print()
-    console.print(
-        f"[bold green]✓ Successfully created {len(tracks)} tracks.[/bold green]"
-    )
-    console.print(f"Output folder: [cyan]{output}[/cyan]")
 
 
 @app.command()
