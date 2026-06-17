@@ -13,8 +13,9 @@ class AlbumMatch:
     title: str
     album: str
     year: str
+    release_id: str
     confidence: float
-
+    
 
 class AlbumLookup:
     """Identify albums from acoustic fingerprints."""
@@ -45,5 +46,6 @@ class AlbumLookup:
             title=metadata.title,
             album=metadata.album,
             year=metadata.year,
+            release_id=metadata.release_id,
             confidence=acoustid.score,
-        )
+)

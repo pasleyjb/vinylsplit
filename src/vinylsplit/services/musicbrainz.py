@@ -15,22 +15,24 @@ class MusicBrainzRecording:
 
 
 class MusicBrainzService:
-    """Retrieve recording metadata from MusicBrainz."""
+    """Retrieve metadata from MusicBrainz."""
 
-    URL = "https://musicbrainz.org/ws/2/recording"
+    URL = "https://musicbrainz.org/ws/2"
+
+    HEADERS = {
+        "User-Agent": "VinylSplit/0.1 (https://github.com/)"
+    }
 
     def lookup(self, recording_id: str) -> MusicBrainzRecording:
-        """Look up a recording by MusicBrainz recording ID."""
+        """Look up a recording."""
 
         response = requests.get(
-            f"{self.URL}/{recording_id}",
+            f"{self.URL}/recording/{recording_id}",
             params={
                 "fmt": "json",
                 "inc": "artists+releases",
             },
-            headers={
-                "User-Agent": "VinylSplit/0.1 (https://github.com/)"
-            },
+            headers=self.HEADERS,
             timeout=30,
         )
 
@@ -45,17 +47,28 @@ class MusicBrainzService:
         release_id = ""
 
         artists = data.get("artist-credit", [])
+
         if artists:
             artist = artists[0]["artist"]["name"]
 
         releases = data.get("releases", [])
+
         if releases:
+
             release = releases[0]
 
-            album = release.get("title", album)
-            release_id = release.get("id", "")
+            album = release.get(
+                "title",
+                album,
+            )
+
+            release_id = release.get(
+                "id",
+                "",
+            )
 
             date = release.get("date", "")
+
             if date:
                 year = date[:4]
 
@@ -66,3 +79,37 @@ class MusicBrainzService:
             year=year,
             release_id=release_id,
         )
+
+    def tracklist(
+        self,
+        release_id: str,
+    ) -> list[str]:
+        """
+        Return the official track list for a release.
+        """
+
+        response = requests.get(
+            f"{self.URL}/release/{release_id}",
+            params={
+                "fmt": "json",
+                "inc": "recordings",
+            },
+            headers=self.HEADERS,
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        titles: list[str] = []
+
+        for medium in data.get("media", []):
+
+            for track in medium.get("tracks", []):
+
+                titles.append(
+                    track["title"]
+                )
+
+        return titles

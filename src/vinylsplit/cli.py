@@ -87,7 +87,7 @@ def analyze(filename: str) -> None:
 def version() -> None:
     """Show the application version."""
 
-    console.print("[bold green]🎵 VinylSplit[/bold green] 0.1.0")
+    console.print("[bold green]🎵 VinylSplit[/bold green] 0.2.0")
 
 
 def main() -> None:
