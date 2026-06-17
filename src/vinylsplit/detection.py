@@ -19,7 +19,7 @@ class TrackDetector:
     def __init__(
         self,
         silence_threshold: float = 0.06,
-        minimum_silence_seconds: float = 2.0,
+        minimum_silence_seconds: float = 1.2,
         window_seconds: float = 0.05,
         smoothing_windows: int = 20,
     ) -> None:
@@ -39,6 +39,10 @@ class TrackDetector:
         smooth = self.smooth_rms(rms)
 
         valleys = self.find_valleys(smooth)
+        print(f"Detected {len(valleys)} silence regions:")
+
+        for valley in valleys:
+            print(f"  {valley * self.window_seconds:.2f} seconds")
 
         return self.build_boundaries(valleys)
 
@@ -120,7 +124,7 @@ class TrackDetector:
                 count = 0
 
         return valleys
-
+    
     def build_boundaries(
         self,
         valleys: list[int],
@@ -133,13 +137,28 @@ class TrackDetector:
             )
         ]
 
-        for index, valley in enumerate(valleys, start=2):
+        minimum_track_seconds = 60.0
+        last_boundary = 0.0
+
+        for valley in valleys:
+
+            start_time = valley * self.window_seconds
+
+            # Ignore the needle drop
+            if start_time < 10.0:
+                continue
+
+            # Ignore boundaries that are too close together
+            if (start_time - last_boundary) < minimum_track_seconds:
+                continue
 
             boundaries.append(
                 TrackBoundary(
-                    track_number=index,
-                    start_time=valley * self.window_seconds,
+                    track_number=len(boundaries) + 1,
+                    start_time=start_time,
                 )
             )
+
+            last_boundary = start_time
 
         return boundaries
