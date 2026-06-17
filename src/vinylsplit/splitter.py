@@ -10,7 +10,7 @@ from vinylsplit.detection import TrackBoundary
 class SplitTrack:
     """Represents an exported track."""
 
-    filename: str
+    path: Path
     start_time: float
     end_time: float
 
@@ -25,11 +25,10 @@ class TrackSplitter:
         output_directory: str,
     ) -> list[SplitTrack]:
         """
-        Split an audio file.
+        Split an audio recording into separate FLAC files.
 
-        Version 1:
-        Creates the output directory and validates the audio.
-        Actual audio splitting will be added next.
+        Audio quality is preserved because samples are copied directly
+        from the original recording.
         """
 
         source = Path(filename)
@@ -40,26 +39,58 @@ class TrackSplitter:
         output = Path(output_directory)
         output.mkdir(parents=True, exist_ok=True)
 
-        info = sf.info(str(source))
+        # Read the entire recording once
+        audio, samplerate = sf.read(
+            str(source),
+            always_2d=False,
+        )
 
-        duration = info.frames / info.samplerate
+        total_samples = len(audio)
+        duration = total_samples / samplerate
 
         tracks: list[SplitTrack] = []
 
         for index, boundary in enumerate(boundaries):
 
-            start = boundary.start_time
+            start_time = boundary.start_time
 
             if index + 1 < len(boundaries):
-                end = boundaries[index + 1].start_time
+                end_time = boundaries[index + 1].start_time
             else:
-                end = duration
+                end_time = duration
+
+            start_sample = max(
+                0,
+                int(round(start_time * samplerate)),
+            )
+
+            end_sample = min(
+                total_samples,
+                int(round(end_time * samplerate)),
+            )
+
+            if end_sample <= start_sample:
+                continue
+
+            track_audio = audio[start_sample:end_sample]
+
+            output_path = (
+                output /
+                f"{boundary.track_number:02d} Track.flac"
+            )
+
+            sf.write(
+                file=str(output_path),
+                data=track_audio,
+                samplerate=samplerate,
+                format="FLAC",
+            )
 
             tracks.append(
                 SplitTrack(
-                    filename=f"Track {boundary.track_number:02d}.flac",
-                    start_time=start,
-                    end_time=end,
+                    path=output_path,
+                    start_time=start_time,
+                    end_time=end_time,
                 )
             )
 

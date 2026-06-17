@@ -1,29 +1,39 @@
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from vinylsplit.detection import TrackBoundary
 
 
-@dataclass
-class AnalysisReport:
-    """Complete analysis of an audio recording."""
+@dataclass(slots=True)
+class SilenceRegion:
+    """Represents one continuous region of silence."""
 
-    filename: str
-
-    duration: float
-
-    sample_rate: int
-
-    channels: int
-
-    detected_tracks: list[TrackBoundary] = field(default_factory=list)
-
-    confidence: float = 0.0
-
-    warnings: list[str] = field(default_factory=list)
-
-    notes: list[str] = field(default_factory=list)
+    start_window: int
+    end_window: int
 
     @property
-    def track_count(self) -> int:
-        """Return the number of detected tracks."""
-        return len(self.detected_tracks)
+    def center_window(self) -> int:
+        """Return the center window of the silence region."""
+        return (self.start_window + self.end_window) // 2
+
+    @property
+    def length(self) -> int:
+        """Return the length of the silence region in windows."""
+        return self.end_window - self.start_window + 1
+
+
+@dataclass(slots=True)
+class AnalysisReport:
+    """Complete results produced by the analysis engine."""
+
+    sample_rate: int
+    duration: float
+
+    rms: np.ndarray
+
+    threshold: float
+
+    silence_regions: list[SilenceRegion] = field(default_factory=list)
+
+    boundaries: list[TrackBoundary] = field(default_factory=list)
