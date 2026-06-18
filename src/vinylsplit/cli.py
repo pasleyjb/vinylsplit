@@ -1,12 +1,7 @@
 import typer
 
 from vinylsplit.pipeline import Pipeline
-from vinylsplit.ui import console, show_banner
-from vinylsplit.ui.tables import (
-    album_table,
-    audio_info_table,
-    track_table,
-)
+from vinylsplit.ui import ui
 from vinylsplit.version import __version__
 
 app = typer.Typer(
@@ -17,30 +12,61 @@ pipeline = Pipeline()
 
 
 @app.command()
-def inspect(filename: str):
+def inspect(filename: str) -> None:
     """Inspect an audio file."""
-    console.print(audio_info_table(pipeline.inspect(filename)))
+
+    info = pipeline.inspect(filename)
+    ui.audio_info(info)
 
 
 @app.command()
-def identify(filename: str):
+def identify(filename: str) -> None:
     """Identify an audio recording."""
-    console.print(album_table(pipeline.identify(filename)))
+
+    match = pipeline.identify(filename)
+    ui.album(match)
 
 
 @app.command()
-def analyze(filename: str):
+def analyze(filename: str) -> None:
     """Analyze an album recording."""
-    console.print(track_table(pipeline.analyze(filename)))
+
+    tracks = pipeline.analyze(filename)
+    ui.tracks(tracks)
 
 
 @app.command()
-def version():
+def process(
+    filename: str,
+    output: str = typer.Option(
+        "output",
+        "--output",
+        "-o",
+        help="Output directory",
+    ),
+) -> None:
+    """Process an album recording."""
+
+    ui.info("Processing album...")
+
+    results = pipeline.process(
+        filename=filename,
+        output_directory=output,
+    )
+
+    ui.success(
+        f"Finished. Successfully processed {len(results)} tracks."
+    )
+
+
+@app.command()
+def version() -> None:
     """Show application version."""
-    show_banner(__version__)
+
+    ui.banner(__version__)
 
 
-def main():
+def main() -> None:
     app()
 
 
