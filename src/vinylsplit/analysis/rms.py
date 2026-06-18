@@ -61,17 +61,12 @@ class RMSAnalyzer:
         values = []
 
         for start in range(0, len(audio), window_size):
-
-            window = audio[start:start + window_size]
+            window = audio[start : start + window_size]
 
             if len(window) == 0:
                 continue
 
-            rms = np.sqrt(
-                np.mean(
-                    np.square(window)
-                )
-            )
+            rms = np.sqrt(np.mean(np.square(window)))
 
             values.append(float(rms))
 

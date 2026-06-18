@@ -19,9 +19,7 @@ class MusicBrainzService:
 
     URL = "https://musicbrainz.org/ws/2"
 
-    HEADERS = {
-        "User-Agent": "VinylSplit/0.1 (https://github.com/)"
-    }
+    HEADERS = {"User-Agent": "VinylSplit/0.1 (https://github.com/)"}
 
     def lookup(self, recording_id: str) -> MusicBrainzRecording:
         """Look up a recording."""
@@ -54,7 +52,6 @@ class MusicBrainzService:
         releases = data.get("releases", [])
 
         if releases:
-
             release = releases[0]
 
             album = release.get(
@@ -105,11 +102,7 @@ class MusicBrainzService:
         titles: list[str] = []
 
         for medium in data.get("media", []):
-
             for track in medium.get("tracks", []):
-
-                titles.append(
-                    track["title"]
-                )
+                titles.append(track["title"])
 
         return titles

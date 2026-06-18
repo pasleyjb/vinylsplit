@@ -10,6 +10,8 @@ from vinylsplit.models import AudioInfo
 from vinylsplit.services.coverart import CoverArtService
 from vinylsplit.smart_identifier import SmartIdentifier
 from vinylsplit.splitter import SplitTrack, TrackSplitter
+from vinylsplit.ui.dashboard import Dashboard
+from vinylsplit.ui.progress import ProcessingProgress
 from vinylsplit.utils import sanitize_filename
 
 
@@ -22,43 +24,25 @@ class Pipeline:
         self.detector = TrackDetector()
         self.splitter = TrackSplitter()
         self.resolver = AlbumResolver()
-
         self.coverart = CoverArtService()
         self.embedder = ArtworkEmbedder()
 
     def inspect(self, filename: str) -> AudioInfo:
-        """Read information about an audio file."""
-
         path = Path(filename)
-
         if not path.exists():
             raise FileNotFoundError(path)
-
         return read_audio(str(path))
 
     def identify(self, filename: str) -> AlbumMatch:
-        """Identify an audio recording."""
-
         fingerprint = self.fingerprinter.fingerprint(filename)
-
         lookup = AlbumLookup()
-
         return lookup.identify(fingerprint)
 
     def analyze(self, filename: str) -> list[TrackBoundary]:
-        """Analyze an audio file for track boundaries."""
-
         return self.detector.detect(filename)
 
-    def split(
-        self,
-        filename: str,
-        output_directory: str,
-    ) -> list[SplitTrack]:
-        """Analyze and split an audio recording."""
-
+    def split(self, filename: str, output_directory: str) -> list[SplitTrack]:
         boundaries = self.analyze(filename)
-
         return self.splitter.split(
             filename=filename,
             boundaries=boundaries,
@@ -70,203 +54,198 @@ class Pipeline:
         filename: str,
         output_directory: str,
     ) -> list[tuple[SplitTrack, AlbumMatch]]:
-        """
-        Complete VinylSplit workflow.
+        progress = ProcessingProgress()
+        dashboard = Dashboard(progress)
+        dashboard.set_album(input_filename=filename)
+        dashboard.set_output(output_directory)
+        dashboard.set_stage("Preparing", "Preparing")
+        dashboard.set_status("Preparing")
+        dashboard.start()
 
-        1. Detect track boundaries
-        2. Split the recording
-        3. Identify tracks
-        4. Resolve album
-        5. Rename tracks
-        6. Recover missing titles
-        7. Download artwork
-        8. Embed artwork
-        """
+        try:
+            overall_stages = (
+                "analyze_audio",
+                "write_tracks",
+                "identify_tracks",
+                "resolve_album",
+                "organize_tracks",
+                "artwork",
+            )
 
-        #
-        # Split the album
-        #
-        tracks = self.split(
-            filename=filename,
-            output_directory=output_directory,
-        )
+            progress.update("overall", completed=0, total=len(overall_stages))
+            progress.update("analyze_audio", completed=0, total=1)
+            progress.update(
+                "detect_silence",
+                completed=0,
+                total=None,
+                description="Detect Silence",
+            )
+            progress.update("write_tracks", completed=0)
 
-        results: list[tuple[SplitTrack, AlbumMatch]] = []
-        failed: list[SplitTrack] = []
+            dashboard.set_stage("Analyzing Audio", "Reading audio")
+            dashboard.set_status("Analyzing audio")
+            boundaries = self.analyze(filename)
+            progress.update("analyze_audio", completed=1)
+            progress.advance("overall", 1)
+            dashboard.refresh()
 
-        #
-        # Identify every track
-        #
-        for track in tracks:
+            written_tracks = 0
 
-            print(f"Identifying {track.path.name}...")
-
-            try:
-
-                match = self.identifier.identify(
-                    source_file=filename,
-                    track=track,
+            def set_write_total(total: int) -> None:
+                dashboard.set_stage("Write Tracks", "Preparing track exports")
+                dashboard.set_track(completed=0, total=total)
+                progress.update(
+                    "write_tracks",
+                    completed=0,
+                    total=total,
                 )
+                dashboard.refresh()
 
-                results.append(
-                    (
-                        track,
-                        match,
+            def track_written(track: SplitTrack) -> None:
+                nonlocal written_tracks
+
+                written_tracks += 1
+                dashboard.set_track(
+                    current_track=track.path.name,
+                    completed=written_tracks,
+                )
+                progress.advance("write_tracks", 1)
+                dashboard.refresh()
+
+            dashboard.set_stage("Write Tracks", "Writing track files")
+            dashboard.set_status("Writing tracks")
+            tracks = self.splitter.split(
+                filename=filename,
+                boundaries=boundaries,
+                output_directory=output_directory,
+                total_callback=set_write_total,
+                track_callback=track_written,
+            )
+            progress.update("write_tracks", total=len(tracks))
+            progress.advance("overall", 1)
+            dashboard.set_track(completed=len(tracks), total=len(tracks))
+            dashboard.refresh()
+
+            results: list[tuple[SplitTrack, AlbumMatch]] = []
+            failed: list[SplitTrack] = []
+            identified_tracks = 0
+
+            dashboard.set_stage("Identifying Tracks", "Identifying exported tracks")
+            dashboard.set_status("Identifying tracks")
+            dashboard.set_track(completed=0, total=len(tracks))
+            for track in tracks:
+                dashboard.set_track(current_track=track.path.name)
+
+                try:
+                    match = self.identifier.identify(
+                        source_file=filename,
+                        track=track,
                     )
+                    results.append((track, match))
+                except RuntimeError:
+                    dashboard.set_status(
+                        f"Could not identify {track.path.name}",
+                        "warning",
+                    )
+                    failed.append(track)
+                identified_tracks += 1
+                dashboard.set_track(
+                    current_track=track.path.name,
+                    completed=identified_tracks,
+                    total=len(tracks),
                 )
 
-            except RuntimeError:
-
-                print(
-                    f"  Could not identify {track.path.name}"
-                )
-
-                failed.append(track)
-
-        print()
-
-        print(
-            f"Successfully identified "
-            f"{len(results)} of {len(tracks)} tracks."
-        )
-
-        if failed:
-
-            print()
-            print("Tracks requiring manual review:")
-
-            for track in failed:
-                print(f"  {track.path.name}")
-
-        #
-        # Determine the album
-        #
-        print()
-
-        album, official_tracks = self.resolver.resolve(
-            results
-        )
-
-        #
-        # Download artwork
-        #
-        cover = None
-
-        if album:
-
-            try:
-
-                cover = self.coverart.download(
-                    album.release_id
-                )
-
-                print()
-                print("Album artwork downloaded.")
-
-            except Exception:
-
-                cover = None
-
-        #
-        # Rename identified tracks
-        #
-        for track, match in results:
-
-            new_name = (
-                f"{track.track_number:02d} - "
-                f"{sanitize_filename(match.title)}.flac"
+            progress.advance("overall", 1)
+            dashboard.set_status(
+                f"Successfully identified {len(results)} of {len(tracks)} tracks.",
+                "success",
             )
 
-            new_path = track.path.with_name(
-                new_name
-            )
+            if failed:
+                dashboard.set_status("Tracks require manual review", "warning")
 
-            track.path.rename(new_path)
-            track.path = new_path
+            dashboard.set_stage("Resolving Album", "Resolving album consensus")
+            dashboard.set_status("Resolving album")
+            album, official_tracks = self.resolver.resolve(results)
+            progress.advance("overall", 1)
 
-        #
-        # Recover unidentified tracks
-        #
-        if album and failed:
+            cover = None
+            if album:
+                dashboard.set_album(
+                    title=album.album,
+                    artist=album.artist,
+                    year=album.year,
+                    input_filename=filename,
+                )
+                dashboard.set_stage("Downloading Artwork", "Downloading album artwork")
+                dashboard.set_status("Downloading album artwork")
+                try:
+                    cover = self.coverart.download(album.release_id)
+                    dashboard.set_status("Album artwork downloaded", "success")
+                except Exception:
+                    cover = None
 
-            print()
-            print("Recovering track names:")
-
-            for track in failed:
-
-                number = track.track_number
-
-                if number > len(official_tracks):
-                    continue
-
-                title = official_tracks[number - 1]
-
+            dashboard.set_stage("Organize Tracks", "Renaming identified tracks")
+            dashboard.set_status("Organizing tracks")
+            for track, match in results:
+                dashboard.set_track(current_track=track.path.name)
                 new_name = (
-                    f"{number:02d} - "
-                    f"{sanitize_filename(title)}.flac"
+                    f"{track.track_number:02d} - "
+                    f"{sanitize_filename(match.title)}.flac"
                 )
-
-                new_path = track.path.with_name(
-                    new_name
-                )
-
+                new_path = track.path.with_name(new_name)
                 track.path.rename(new_path)
                 track.path = new_path
 
-                print(
-                    f"{number:02d} -> {title}"
+            if album and failed:
+                dashboard.set_stage(
+                    "Organize Tracks",
+                    "Recovering track names",
                 )
+                for track in failed:
+                    dashboard.set_track(current_track=track.path.name)
+                    number = track.track_number
+                    if number > len(official_tracks):
+                        continue
 
-        #
-        # Embed artwork into every exported track
-        #
-        if cover:
+                    title = official_tracks[number - 1]
+                    new_name = f"{number:02d} - {sanitize_filename(title)}.flac"
+                    new_path = track.path.with_name(new_name)
+                    track.path.rename(new_path)
+                    track.path = new_path
+                    dashboard.set_status(f"{number:02d} → {title}", "success")
 
-            print()
-            print("Embedding album artwork...")
+            progress.advance("overall", 1)
 
-            #
-            # Successfully identified tracks
-            #
-            for track, _ in results:
+            if cover:
+                dashboard.set_stage("Embedding Artwork", "Embedding album artwork")
+                dashboard.set_status("Embedding album artwork")
 
-                try:
+                for track, _ in results:
+                    dashboard.set_track(current_track=track.path.name)
+                    try:
+                        self.embedder.embed(str(track.path), cover)
+                        dashboard.set_status(track.path.name, "success")
+                    except Exception as exc:
+                        dashboard.set_status(str(exc), "error")
 
-                    self.embedder.embed(
-                        str(track.path),
-                        cover,
-                    )
+                for track in failed:
+                    dashboard.set_track(current_track=track.path.name)
+                    try:
+                        self.embedder.embed(str(track.path), cover)
+                        dashboard.set_status(track.path.name, "success")
+                    except Exception as exc:
+                        dashboard.set_status(str(exc), "error")
 
-                    print(
-                        f"  ✓ {track.path.name}"
-                    )
+            progress.advance("overall", 1)
+            dashboard.set_stage("Complete", "Finished")
+            dashboard.set_status("Success", "success")
+            dashboard.refresh()
 
-                except Exception as exc:
-
-                    print(
-                        f"  ✗ {track.path.name}: {exc}"
-                    )
-
-            #
-            # Recovered tracks
-            #
-            for track in failed:
-
-                try:
-
-                    self.embedder.embed(
-                        str(track.path),
-                        cover,
-                    )
-
-                    print(
-                        f"  ✓ {track.path.name}"
-                    )
-
-                except Exception as exc:
-
-                    print(
-                        f"  ✗ {track.path.name}: {exc}"
-                    )
-
-        return results
+            return results
+        except Exception as exc:
+            dashboard.set_status(str(exc), "error")
+            dashboard.refresh()
+            raise
+        finally:
+            dashboard.stop()

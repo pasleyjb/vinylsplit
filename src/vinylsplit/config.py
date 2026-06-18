@@ -15,9 +15,7 @@ class Settings:
         key = os.getenv("ACOUSTID_API_KEY")
 
         if not key:
-            raise RuntimeError(
-                "ACOUSTID_API_KEY not found. Please create a .env file."
-            )
+            raise RuntimeError("ACOUSTID_API_KEY not found. Please create a .env file.")
 
         return key
 

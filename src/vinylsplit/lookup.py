@@ -15,7 +15,7 @@ class AlbumMatch:
     year: str
     release_id: str
     confidence: float
-    
+
 
 class AlbumLookup:
     """Identify albums from acoustic fingerprints."""
@@ -37,9 +37,7 @@ class AlbumLookup:
 
         acoustid = self.acoustid.lookup(fingerprint)
 
-        metadata = self.musicbrainz.lookup(
-            acoustid.recording_id
-        )
+        metadata = self.musicbrainz.lookup(acoustid.recording_id)
 
         return AlbumMatch(
             artist=metadata.artist,
@@ -48,4 +46,4 @@ class AlbumLookup:
             year=metadata.year,
             release_id=metadata.release_id,
             confidence=acoustid.score,
-)
+        )

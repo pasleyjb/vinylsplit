@@ -75,15 +75,12 @@ class TrackDetector:
         rms = []
 
         for start in range(0, len(audio), window):
-
-            chunk = audio[start:start + window]
+            chunk = audio[start : start + window]
 
             if len(chunk) == 0:
                 continue
 
-            rms.append(
-                np.sqrt(np.mean(chunk ** 2))
-            )
+            rms.append(np.sqrt(np.mean(chunk**2)))
 
         return np.array(rms)
 
@@ -104,29 +101,23 @@ class TrackDetector:
 
         valleys = []
 
-        minimum_windows = int(
-            self.minimum_silence_seconds /
-            self.window_seconds
-        )
+        minimum_windows = int(self.minimum_silence_seconds / self.window_seconds)
 
         count = 0
 
         for i, value in enumerate(smooth):
-
             if value < self.silence_threshold:
                 count += 1
             else:
-
                 if count >= minimum_windows:
-
-                    start = i - count 
+                    start = i - count
 
                     valleys.append(start)
 
                 count = 0
 
         return valleys
-    
+
     def build_boundaries(
         self,
         valleys: list[int],
@@ -143,12 +134,7 @@ class TrackDetector:
         last_boundary = 0.0
 
         for valley in valleys:
-
-            
-            start_time = (
-                valley * self.window_seconds
-                + self.boundary_offset_seconds
-            )
+            start_time = valley * self.window_seconds + self.boundary_offset_seconds
             # Ignore the needle drop
             if start_time < 10.0:
                 continue

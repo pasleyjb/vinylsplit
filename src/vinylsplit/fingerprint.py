@@ -28,15 +28,12 @@ class Fingerprinter:
                 check=True,
             )
         except FileNotFoundError:
-            raise RuntimeError(
-                "fpcalc was not found. Please install Chromaprint."
-            )
+            raise RuntimeError("fpcalc was not found. Please install Chromaprint.")
 
         duration = 0
         fingerprint = ""
 
         for line in result.stdout.splitlines():
-
             if line.startswith("DURATION="):
                 duration = int(line.split("=", 1)[1])
 

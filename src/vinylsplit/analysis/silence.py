@@ -35,10 +35,7 @@ class SilenceDetector:
 
         minimum_windows = max(
             1,
-            int(
-                self.minimum_silence_seconds /
-                rms.window_seconds
-            ),
+            int(self.minimum_silence_seconds / rms.window_seconds),
         )
 
         regions: list[SilenceRegion] = []
@@ -46,20 +43,15 @@ class SilenceDetector:
         start = None
 
         for index, value in enumerate(values):
-
             if value < threshold:
-
                 if start is None:
                     start = index
 
             else:
-
                 if start is not None:
-
                     length = index - start
 
                     if length >= minimum_windows:
-
                         regions.append(
                             SilenceRegion(
                                 start_window=start,
@@ -70,11 +62,9 @@ class SilenceDetector:
                     start = None
 
         if start is not None:
-
             length = len(values) - start
 
             if length >= minimum_windows:
-
                 regions.append(
                     SilenceRegion(
                         start_window=start,
@@ -104,26 +94,18 @@ class SilenceDetector:
 
         merged = [regions[0]]
 
-        merge_distance = int(
-            3.0 / rms.window_seconds
-        )
+        merge_distance = int(3.0 / rms.window_seconds)
 
         for region in regions[1:]:
-
             previous = merged[-1]
 
-            if (
-                region.start_window
-                - previous.end_window
-            ) <= merge_distance:
-
+            if (region.start_window - previous.end_window) <= merge_distance:
                 merged[-1] = SilenceRegion(
                     start_window=previous.start_window,
                     end_window=region.end_window,
                 )
 
             else:
-
                 merged.append(region)
 
         return merged

@@ -25,22 +25,16 @@ class AlbumResolver:
         #
         # Count every release ID
         #
-        counts = Counter(
-            match.release_id
-            for _, match in identified
-        )
+        counts = Counter(match.release_id for _, match in identified)
 
         winner, votes = counts.most_common(1)[0]
 
         print()
-        print(
-            f"Album consensus: {votes}/{len(identified)} tracks"
-        )
+        print(f"Album consensus: {votes}/{len(identified)} tracks")
 
         album = None
 
         for _, match in identified:
-
             if match.release_id == winner:
                 album = match
                 break
@@ -52,9 +46,7 @@ class AlbumResolver:
         print(f"Artist: {album.artist}")
         print(f"Release ID: {album.release_id}")
 
-        tracklist = self.musicbrainz.tracklist(
-            album.release_id
-        )
+        tracklist = self.musicbrainz.tracklist(album.release_id)
 
         print()
         print("Official track list:")

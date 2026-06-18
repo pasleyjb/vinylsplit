@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,8 @@ class TrackSplitter:
         filename: str,
         boundaries: list[TrackBoundary],
         output_directory: str,
+        total_callback: Callable[[int], None] | None = None,
+        track_callback: Callable[[SplitTrack], None] | None = None,
     ) -> list[SplitTrack]:
         """
         Split an audio recording into separate FLAC files.
@@ -48,10 +51,9 @@ class TrackSplitter:
         total_samples = len(audio)
         duration = total_samples / samplerate
 
-        tracks: list[SplitTrack] = []
+        pending_tracks: list[SplitTrack] = []
 
         for index, boundary in enumerate(boundaries):
-
             start_time = boundary.start_time
 
             if index + 1 < len(boundaries):
@@ -72,21 +74,9 @@ class TrackSplitter:
             if end_sample <= start_sample:
                 continue
 
-            track_audio = audio[start_sample:end_sample]
+            output_path = output / f"{boundary.track_number:02d} Track.flac"
 
-            output_path = (
-                output /
-                f"{boundary.track_number:02d} Track.flac"
-            )
-
-            sf.write(
-                file=str(output_path),
-                data=track_audio,
-                samplerate=samplerate,
-                format="FLAC",
-            )
-
-            tracks.append(
+            pending_tracks.append(
                 SplitTrack(
                     track_number=boundary.track_number,
                     path=output_path,
@@ -94,5 +84,35 @@ class TrackSplitter:
                     end_time=end_time,
                 )
             )
+
+        if total_callback:
+            total_callback(len(pending_tracks))
+
+        tracks: list[SplitTrack] = []
+
+        for track in pending_tracks:
+            start_sample = max(
+                0,
+                int(round(track.start_time * samplerate)),
+            )
+
+            end_sample = min(
+                total_samples,
+                int(round(track.end_time * samplerate)),
+            )
+
+            track_audio = audio[start_sample:end_sample]
+
+            sf.write(
+                file=str(track.path),
+                data=track_audio,
+                samplerate=samplerate,
+                format="FLAC",
+            )
+
+            tracks.append(track)
+
+            if track_callback:
+                track_callback(track)
 
         return tracks

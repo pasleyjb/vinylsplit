@@ -35,9 +35,7 @@ class RetryGenerator:
 
         end_time = track.end_time
 
-        start_sample = int(
-            round(start_time * samplerate)
-        )
+        start_sample = int(round(start_time * samplerate))
 
         end_sample = min(
             total_samples,
@@ -46,10 +44,7 @@ class RetryGenerator:
 
         temp_audio = audio[start_sample:end_sample]
 
-        temp_file = (
-            Path(track.path).parent /
-            f".retry_{track.track_number}.flac"
-        )
+        temp_file = Path(track.path).parent / f".retry_{track.track_number}.flac"
 
         sf.write(
             str(temp_file),

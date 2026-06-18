@@ -23,15 +23,10 @@ class SmartIdentifier:
         # First attempt
         #
         try:
-            return self.lookup.identify_file(
-                str(track.path)
-            )
+            return self.lookup.identify_file(str(track.path))
 
         except Exception:
-
-            print(
-                f"Retrying Track {track.track_number}..."
-            )
+            print(f"Retrying Track {track.track_number}...")
 
         #
         # Retry offsets
@@ -42,14 +37,10 @@ class SmartIdentifier:
             0.25,
             0.50,
         ):
-
             temp_file = None
 
             try:
-
-                print(
-                    f"  Trying {offset:+.2f} seconds..."
-                )
+                print(f"  Trying {offset:+.2f} seconds...")
 
                 temp_file = self.retry.generate(
                     source_file=source_file,
@@ -57,28 +48,16 @@ class SmartIdentifier:
                     offset_seconds=offset,
                 )
 
-                match = self.lookup.identify_file(
-                    str(temp_file)
-                )
+                match = self.lookup.identify_file(str(temp_file))
 
-                Path(temp_file).unlink(
-                    missing_ok=True
-                )
+                Path(temp_file).unlink(missing_ok=True)
 
-                print(
-                    f"  Success using {offset:+.2f}"
-                )
+                print(f"  Success using {offset:+.2f}")
 
                 return match
 
             except Exception:
-
-                if (
-                    temp_file is not None
-                    and Path(temp_file).exists()
-                ):
+                if temp_file is not None and Path(temp_file).exists():
                     Path(temp_file).unlink()
 
-        raise RuntimeError(
-            "Unable to identify track."
-        )
+        raise RuntimeError("Unable to identify track.")

@@ -34,11 +34,7 @@ class BoundaryBuilder:
         last_boundary = 0.0
 
         for region in regions:
-
-            boundary = (
-                region.center_window
-                * self.window_seconds
-            )
+            boundary = region.center_window * self.window_seconds
 
             #
             # Ignore the needle drop
@@ -49,17 +45,13 @@ class BoundaryBuilder:
             #
             # Ignore the run-out groove
             #
-            if boundary > (
-                duration - self.ignore_end_seconds
-            ):
+            if boundary > (duration - self.ignore_end_seconds):
                 continue
 
             #
             # Ignore impossibly short tracks
             #
-            if (
-                boundary - last_boundary
-            ) < self.minimum_track_seconds:
+            if (boundary - last_boundary) < self.minimum_track_seconds:
                 continue
 
             boundaries.append(

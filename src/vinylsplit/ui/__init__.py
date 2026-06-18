@@ -15,16 +15,16 @@ class UI:
         console.print(obj)
 
     def info(self, text: str):
-        console.print(f"[cyan]ℹ[/] {text}")
+        console.print(f"[info]ℹ[/] {text}")
 
     def success(self, text: str):
-        console.print(f"[green]✓[/] {text}")
+        console.print(f"[success]✓[/] {text}")
 
     def warning(self, text: str):
-        console.print(f"[yellow]⚠[/] {text}")
+        console.print(f"[warning]⚠[/] {text}")
 
     def error(self, text: str):
-        console.print(f"[red]✗[/] {text}")
+        console.print(f"[error]✗[/] {text}")
 
     def audio_info(self, info):
         console.print(audio_info_table(info))

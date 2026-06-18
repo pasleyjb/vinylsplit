@@ -24,7 +24,6 @@ class TrackIdentifier:
         tracks = []
 
         for file in sorted(path.glob("*.flac")):
-
             print(f"Identifying {file.name}...")
 
             match = self.lookup.identify_file(str(file))

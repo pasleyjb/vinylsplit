@@ -4,9 +4,7 @@ from vinylsplit.pipeline import Pipeline
 from vinylsplit.ui import ui
 from vinylsplit.version import __version__
 
-app = typer.Typer(
-    help="Inspect, identify, and process audio album recordings."
-)
+app = typer.Typer(help="Inspect, identify, and process audio album recordings.")
 
 pipeline = Pipeline()
 
@@ -54,9 +52,7 @@ def process(
         output_directory=output,
     )
 
-    ui.success(
-        f"Finished. Successfully processed {len(results)} tracks."
-    )
+    ui.success(f"Finished. Successfully processed {len(results)} tracks.")
 
 
 @app.command()

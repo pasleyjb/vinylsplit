@@ -2,7 +2,6 @@ from mutagen.flac import FLAC, Picture
 
 
 class ArtworkEmbedder:
-
     def embed(
         self,
         filename: str,
@@ -13,7 +12,7 @@ class ArtworkEmbedder:
 
         picture = Picture()
 
-        picture.type = 3          # Front Cover
+        picture.type = 3  # Front Cover
         picture.mime = "image/jpeg"
         picture.data = image
 
