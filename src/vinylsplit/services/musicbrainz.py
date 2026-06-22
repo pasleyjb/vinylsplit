@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import requests
 
 
-@dataclass
+@dataclass(slots=True)
 class MusicBrainzRecording:
     """Metadata returned from MusicBrainz."""
 
@@ -14,15 +14,28 @@ class MusicBrainzRecording:
     release_id: str
 
 
+@dataclass(slots=True)
+class MusicBrainzAlbum:
+    """Album returned from an album search."""
+
+    artist: str
+    album: str
+    year: str
+    release_id: str
+    track_count: int
+
+
 class MusicBrainzService:
     """Retrieve metadata from MusicBrainz."""
 
     URL = "https://musicbrainz.org/ws/2"
 
-    HEADERS = {"User-Agent": "VinylSplit/0.1 (https://github.com/)"}
+    HEADERS = {
+        "User-Agent": "VinylSplit/1.0 (https://github.com/pasleyjb/vinylsplit)"
+    }
 
     def lookup(self, recording_id: str) -> MusicBrainzRecording:
-        """Look up a recording."""
+        """Look up a recording by MusicBrainz recording ID."""
 
         response = requests.get(
             f"{self.URL}/recording/{recording_id}",
@@ -54,15 +67,8 @@ class MusicBrainzService:
         if releases:
             release = releases[0]
 
-            album = release.get(
-                "title",
-                album,
-            )
-
-            release_id = release.get(
-                "id",
-                "",
-            )
+            album = release.get("title", album)
+            release_id = release.get("id", "")
 
             date = release.get("date", "")
 
@@ -75,6 +81,59 @@ class MusicBrainzService:
             album=album,
             year=year,
             release_id=release_id,
+        )
+
+    def search_album(
+        self,
+        artist: str,
+        album: str,
+    ) -> MusicBrainzAlbum | None:
+        """
+        Search MusicBrainz for an album using artist and album name.
+
+        Returns None if no suitable release is found.
+        """
+
+        response = requests.get(
+            f"{self.URL}/release",
+            params={
+                "fmt": "json",
+                "query": f'artist:"{artist}" release:"{album}"',
+                "limit": 1,
+            },
+            headers=self.HEADERS,
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        releases = data.get("releases", [])
+
+        if not releases:
+            return None
+
+        release = releases[0]
+
+        year = "----"
+
+        if release.get("date"):
+            year = release["date"][:4]
+
+        track_count = 0
+
+        media = release.get("media", [])
+
+        if media:
+            track_count = media[0].get("track-count", 0)
+
+        return MusicBrainzAlbum(
+            artist=artist,
+            album=release.get("title", album),
+            year=year,
+            release_id=release["id"],
+            track_count=track_count,
         )
 
     def tracklist(

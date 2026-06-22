@@ -25,9 +25,11 @@ class SmartIdentifier:
         try:
             return self.lookup.identify_file(str(track.path))
 
-        except Exception:
+        except Exception as exc:
+            print(f"\nInitial lookup failed for Track {track.track_number}")
+            print(type(exc).__name__)
+            print(exc)
             print(f"Retrying Track {track.track_number}...")
-
         #
         # Retry offsets
         #
@@ -56,7 +58,11 @@ class SmartIdentifier:
 
                 return match
 
-            except Exception:
+            except Exception as exc:
+                print(f"  Retry {offset:+.2f} failed")
+                print(type(exc).__name__)
+                print(exc)
+
                 if temp_file is not None and Path(temp_file).exists():
                     Path(temp_file).unlink()
 

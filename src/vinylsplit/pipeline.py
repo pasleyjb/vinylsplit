@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from vinylsplit.album_identifier import AlbumIdentifier
 from vinylsplit.audio import read_audio
+from vinylsplit.boundary_optimizer import BoundaryOptimizer
 from vinylsplit.album_resolver import AlbumResolver
 from vinylsplit.detection import TrackBoundary, TrackDetector
 from vinylsplit.embedder import ArtworkEmbedder
@@ -21,7 +23,9 @@ class Pipeline:
     def __init__(self) -> None:
         self.fingerprinter = Fingerprinter()
         self.identifier = SmartIdentifier()
+        self.album_identifier = AlbumIdentifier()
         self.detector = TrackDetector()
+        self.optimizer = BoundaryOptimizer()
         self.splitter = TrackSplitter()
         self.resolver = AlbumResolver()
         self.coverart = CoverArtService()
@@ -81,12 +85,34 @@ class Pipeline:
                 description="Detect Silence",
             )
             progress.update("write_tracks", completed=0)
-
             dashboard.set_stage("Analyzing Audio", "Reading audio")
             dashboard.set_status("Analyzing audio")
+
+            album_info = self.album_identifier.identify(filename)
+
+            if album_info:
+                dashboard.set_album(
+                    title=album_info.album,
+                    artist=album_info.artist,
+                    year=album_info.year,
+                    input_filename=filename,
+                )
+
+                dashboard.set_status(
+                    f"Album identified: {album_info.artist} - {album_info.album}",
+                    "success",
+                )
+
             boundaries = self.analyze(filename)
+
+            if album_info:
+                boundaries = self.optimizer.optimize(
+                    boundaries=boundaries,
+                    expected_tracks=album_info.track_count,
+            )
             progress.update("analyze_audio", completed=1)
             progress.advance("overall", 1)
+            dashboard.refresh()
             dashboard.refresh()
 
             written_tracks = 0
@@ -134,6 +160,7 @@ class Pipeline:
             dashboard.set_status("Identifying tracks")
             dashboard.set_track(completed=0, total=len(tracks))
             for track in tracks:
+                print(f"IDENTIFYING: {track.path.name}")
                 dashboard.set_track(current_track=track.path.name)
 
                 try:
@@ -142,7 +169,10 @@ class Pipeline:
                         track=track,
                     )
                     results.append((track, match))
-                except RuntimeError:
+                except RuntimeError as exc:
+                    print(f"\nFAILED: {track.path.name}")
+                    print(exc)
+
                     dashboard.set_status(
                         f"Could not identify {track.path.name}",
                         "warning",

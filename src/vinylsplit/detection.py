@@ -4,6 +4,8 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
+from vinylsplit.silence_region import SilenceRegion
+
 
 @dataclass
 class TrackBoundary:
@@ -41,10 +43,16 @@ class TrackDetector:
         smooth = self.smooth_rms(rms)
 
         valleys = self.find_valleys(smooth)
+        valleys = self.merge_regions(valleys)
+        
         print(f"Detected {len(valleys)} silence regions:")
 
-        for valley in valleys:
-            print(f"  {valley * self.window_seconds:.2f} seconds")
+        for region in valleys:
+            print(
+                f"  {region.start_time:.2f}s"
+                f" → {region.end_time:.2f}s"
+                f" ({region.duration:.2f}s)"
+            )
 
         return self.build_boundaries(valleys)
 
@@ -96,12 +104,14 @@ class TrackDetector:
             mode="same",
         )
 
-    def find_valleys(self, smooth: np.ndarray) -> list[int]:
+    def find_valleys(self, smooth: np.ndarray) -> list[SilenceRegion]:
         """Find quiet regions."""
 
         valleys = []
 
-        minimum_windows = int(self.minimum_silence_seconds / self.window_seconds)
+        minimum_windows = int(
+            self.minimum_silence_seconds / self.window_seconds
+        )
 
         count = 0
 
@@ -111,16 +121,64 @@ class TrackDetector:
             else:
                 if count >= minimum_windows:
                     start = i - count
+                    end = i - 1
 
-                    valleys.append(start)
+                    region = SilenceRegion(
+                        start_window=start,
+                        end_window=end,
+                        start_time=start * self.window_seconds,
+                        end_time=end * self.window_seconds,
+                        duration=(end - start + 1) * self.window_seconds,
+                        minimum_rms=float(
+                            np.min(smooth[start : end + 1])
+                        ),
+                        average_rms=float(
+                            np.mean(smooth[start : end + 1])
+                        ),
+                    )
+
+                    valleys.append(region)
 
                 count = 0
 
         return valleys
 
+    def merge_regions(
+        self,
+        regions: list[SilenceRegion],
+        maximum_gap: float = 1.0,
+    ) -> list[SilenceRegion]:
+        """Merge nearby silence regions into a single region."""
+
+        if not regions:
+            return []
+
+        merged = [regions[0]]
+
+        for region in regions[1:]:
+            current = merged[-1]
+
+            gap = region.start_time - current.end_time
+
+            if gap <= maximum_gap:
+                current.end_window = region.end_window
+                current.end_time = region.end_time
+                current.duration = current.end_time - current.start_time
+                current.minimum_rms = min(
+                    current.minimum_rms,
+                    region.minimum_rms,
+                )
+                current.average_rms = (
+                    current.average_rms + region.average_rms
+                ) / 2.0
+            else:
+                merged.append(region)
+
+        return merged
+
     def build_boundaries(
         self,
-        valleys: list[int],
+        valleys: list[SilenceRegion],
     ) -> list[TrackBoundary]:
 
         boundaries = [
@@ -133,8 +191,38 @@ class TrackDetector:
         minimum_track_seconds = 60.0
         last_boundary = 0.0
 
-        for valley in valleys:
-            start_time = valley * self.window_seconds + self.boundary_offset_seconds
+        for region in valleys:
+            start_time = (
+                region.start_time
+                + self.boundary_offset_seconds
+            )
+            # Ignore the needle drop
+            if start_time < 10.0:
+                continue
+
+            # Ignore boundaries that are too close together
+            if (start_time - last_boundary) < minimum_track_seconds:
+                continue
+
+            boundaries.append(
+                TrackBoundary(
+                    track_number=len(boundaries) + 1,
+                    start_time=start_time,
+                )
+            )
+
+            last_boundary = start_time
+
+        return boundaries
+
+        minimum_track_seconds = 60.0
+        last_boundary = 0.0
+
+        for region in valleys:
+            start_time = (
+                region.start_time
+                + self.boundary_offset_seconds
+            )
             # Ignore the needle drop
             if start_time < 10.0:
                 continue
