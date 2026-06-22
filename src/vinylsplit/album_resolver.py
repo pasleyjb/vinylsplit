@@ -19,22 +19,24 @@ class AlbumResolver:
         identified: list[tuple[SplitTrack, AlbumMatch]],
     ) -> tuple[AlbumMatch | None, list[str]]:
 
-        if not identified:
+        # Filter out entries where the AlbumMatch is None (e.g. failed IDs).
+        valid_matches = [match for _, match in identified if match is not None]
+
+        if not valid_matches:
             return None, []
 
-        #
-        # Count every release ID
-        #
-        counts = Counter(match.release_id for _, match in identified)
+        # Count every release ID among valid matches
+        counts = Counter(match.release_id for match in valid_matches)
 
+        # Determine the most common release_id
         winner, votes = counts.most_common(1)[0]
 
         print()
-        print(f"Album consensus: {votes}/{len(identified)} tracks")
+        print(f"Album consensus: {votes}/{len(valid_matches)} tracks")
 
         album = None
 
-        for _, match in identified:
+        for match in valid_matches:
             if match.release_id == winner:
                 album = match
                 break

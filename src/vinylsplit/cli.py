@@ -1,12 +1,22 @@
+import asyncio
+
 import typer
 
 from vinylsplit.pipeline import Pipeline
 from vinylsplit.ui import ui
+from vinylsplit.ui.wizard import run_interactive_wizard
 from vinylsplit.version import __version__
 
 app = typer.Typer(help="Inspect, identify, and process audio album recordings.")
 
 pipeline = Pipeline()
+
+
+@app.callback(invoke_without_command=True)
+def callback(ctx: typer.Context) -> None:
+    """Handle default behavior when no subcommand is provided."""
+    if ctx.invoked_subcommand is None:
+        run_interactive_wizard()
 
 
 @app.command()
@@ -51,14 +61,28 @@ def process(
         "-o",
         help="Output directory",
     ),
+    artist: str | None = typer.Option(
+        None,
+        "--artist",
+        help="Artist name to use when AcoustID lookup fails.",
+    ),
+    album: str | None = typer.Option(
+        None,
+        "--album",
+        help="Album title to use when AcoustID lookup fails.",
+    ),
 ) -> None:
     """Process an album recording."""
 
     ui.info("Processing album...")
 
-    results = pipeline.process(
-        filename=filename,
-        output_directory=output,
+    results = asyncio.run(
+        pipeline.process(
+            filename=filename,
+            output_directory=output,
+            artist=artist,
+            album=album,
+        )
     )
 
     ui.success(f"Finished. Successfully processed {len(results)} tracks.")

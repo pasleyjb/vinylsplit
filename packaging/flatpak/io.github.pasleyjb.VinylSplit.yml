@@ -1,5 +1,4 @@
 app-id: io.github.pasleyjb.VinylSplit
-
 runtime: org.freedesktop.Platform
 runtime-version: "24.08"
 sdk: org.freedesktop.Sdk
@@ -11,14 +10,12 @@ finish-args:
   - --filesystem=home
 
 modules:
-  - python-dependencies.json
-
   - name: vinylsplit
     buildsystem: simple
 
     build-commands:
-      - pip3 install --no-build-isolation --no-index --find-links="file://${PWD}" --prefix=/app .
+      - pip3 install --no-deps --prefix=/app .
 
     sources:
       - type: dir
-        path: ../../
+        path: ../../.deb

@@ -1,0 +1,5 @@
+vinylsplit (0.9.0-1) unstable; urgency=medium
+
+  * Initial Debian package.
+
+ -- Justin Pasley <you@example.com>  Thu, 18 Jun 2026 20:00:00 -0500
