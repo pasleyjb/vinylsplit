@@ -22,6 +22,15 @@ def identify(filename: str) -> None:
     """Identify an audio recording."""
 
     match = pipeline.identify(filename)
+    if match is None:
+        ui.warning(
+            "No AcoustID match was found for this recording. "
+            "The fingerprint was generated successfully, but no matching recording exists in the AcoustID database. "
+            "You can still use `vinylsplit process` to split the recording, "
+            "or in the future provide `--artist` and `--album` to recover metadata."
+        )
+        return
+
     ui.album(match)
 
 

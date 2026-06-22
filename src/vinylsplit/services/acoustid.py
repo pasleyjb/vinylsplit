@@ -22,8 +22,11 @@ class AcoustIDService:
 
     URL = "https://api.acoustid.org/v2/lookup"
 
-    def lookup(self, fingerprint: Fingerprint) -> AcoustIDResult:
-        """Look up an acoustic fingerprint."""
+    def lookup(self, fingerprint: Fingerprint) -> AcoustIDResult | None:
+        """Look up an acoustic fingerprint.
+
+        Returns None when no AcoustID matches are found.
+        """
 
         response = requests.get(
             self.URL,
@@ -48,7 +51,7 @@ class AcoustIDService:
         results = data.get("results", [])
 
         if not results:
-            raise RuntimeError("No AcoustID matches were found.")
+            return None
 
         best = results[0]
 

@@ -30,6 +30,15 @@ class UI:
         console.print(audio_info_table(info))
 
     def album(self, match):
+        if match is None:
+            self.warning(
+                "No AcoustID match was found for this recording. "
+                "The fingerprint was generated successfully, but no matching recording exists in the AcoustID database. "
+                "You can still use `vinylsplit process` to split the recording, "
+                "or in the future provide `--artist` and `--album` to recover metadata."
+            )
+            return
+
         console.print(album_table(match))
 
     def tracks(self, tracks):
