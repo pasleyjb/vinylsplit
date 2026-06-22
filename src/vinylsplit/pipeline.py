@@ -1,11 +1,26 @@
+import asyncio
 from pathlib import Path
 
 from vinylsplit.audio import read_audio
 from vinylsplit.album_resolver import AlbumResolver
+from vinylsplit.services.musicbrainz import MusicBrainzService
 from vinylsplit.detection import TrackBoundary, TrackDetector
 from vinylsplit.embedder import ArtworkEmbedder
+from vinylsplit.services.artwork import ArtworkService
+from mutagen.flac import FLAC
 from vinylsplit.fingerprint import Fingerprinter
 from vinylsplit.lookup import AlbumLookup, AlbumMatch
+from vinylsplit.metadata_verifier import (
+    AcoustIDMetadataProvider,
+    EmbeddedMetadataProvider,
+    FilePropertiesProvider,
+    MetadataContext,
+    MetadataVerifier,
+    MetadataVerifierConfig,
+    MusicBrainzProvider,
+    UserInputMetadataProvider,
+    display_verification_report,
+)
 from vinylsplit.models import AudioInfo
 from vinylsplit.services.coverart import CoverArtService
 from vinylsplit.smart_identifier import SmartIdentifier
@@ -26,6 +41,23 @@ class Pipeline:
         self.resolver = AlbumResolver()
         self.coverart = CoverArtService()
         self.embedder = ArtworkEmbedder()
+        self.artwork = ArtworkService()
+        
+        # Initialize MetadataVerifier with default config
+        self.verifier_config = MetadataVerifierConfig(
+            auto_proceed_threshold=0.80,
+            interactive_mode=True,
+        )
+        self.verifier = MetadataVerifier(self.verifier_config)
+        self._register_metadata_providers()
+
+    def _register_metadata_providers(self) -> None:
+        """Register all metadata source providers."""
+        self.verifier.register_provider(UserInputMetadataProvider())
+        self.verifier.register_provider(EmbeddedMetadataProvider())
+        self.verifier.register_provider(AcoustIDMetadataProvider())
+        self.verifier.register_provider(MusicBrainzProvider())
+        self.verifier.register_provider(FilePropertiesProvider())
 
     def inspect(self, filename: str) -> AudioInfo:
         path = Path(filename)
@@ -49,10 +81,12 @@ class Pipeline:
             output_directory=output_directory,
         )
 
-    def process(
+    async def process(
         self,
         filename: str,
         output_directory: str,
+        artist: str | None = None,
+        album: str | None = None,
     ) -> list[tuple[SplitTrack, AlbumMatch]]:
         progress = ProcessingProgress()
         dashboard = Dashboard(progress)
@@ -61,6 +95,17 @@ class Pipeline:
         dashboard.set_stage("Preparing", "Preparing")
         dashboard.set_status("Preparing")
         dashboard.start()
+
+        # Preserve user-supplied fallback hints before local variables shadow them
+        user_artist = artist
+        user_album = album
+
+        # Create album folder that will hold all exports
+        album_folder = self.artwork.create_album_folder(
+            output_directory=output_directory,
+            artist=user_artist,
+            album=user_album,
+        )
 
         try:
             overall_stages = (
@@ -117,7 +162,7 @@ class Pipeline:
             tracks = self.splitter.split(
                 filename=filename,
                 boundaries=boundaries,
-                output_directory=output_directory,
+                output_directory=str(album_folder),
                 total_callback=set_write_total,
                 track_callback=track_written,
             )
@@ -137,17 +182,51 @@ class Pipeline:
                 dashboard.set_track(current_track=track.path.name)
 
                 try:
-                    match = self.identifier.identify(
-                        source_file=filename,
-                        track=track,
+                    # Use MetadataVerifier instead of SmartIdentifier
+                    context = MetadataContext(
+                        source_file=str(track.path),
+                        split_track=track,
+                        user_artist=user_artist,
+                        user_album=user_album,
+                        previous_evidence=[],
+                        config=self.verifier_config,
                     )
-                    results.append((track, match))
-                except RuntimeError:
+                    evidence, report = await self.verifier.process_track(context)
+
+                    # Display verification report
+                    display_verification_report(report)
+
+                    # If we have evidence, convert to AlbumMatch
+                    if evidence:
+                        # Prefer a best-available track title from the evidence
+                        title = None
+                        if evidence.best_tracklist and len(evidence.best_tracklist) >= track.track_number:
+                            title = evidence.best_tracklist[track.track_number - 1]
+
+                        if not title:
+                            title = f"Track {track.track_number}"
+
+                        match = AlbumMatch(
+                            artist=evidence.consensus_artist,
+                            title=title,
+                            album=evidence.consensus_album_title,
+                            year=evidence.consensus_year,
+                            release_id=evidence.canonical_release_id or "",
+                            confidence=evidence.overall_confidence,
+                        )
+
+                        results.append((track, match))
+                    else:
+                        dashboard.set_status(f"Could not verify {track.path.name}", "warning")
+                        failed.append(track)
+                        
+                except Exception as exc:
                     dashboard.set_status(
-                        f"Could not identify {track.path.name}",
+                        f"Could not identify {track.path.name}: {exc}",
                         "warning",
                     )
                     failed.append(track)
+                    
                 identified_tracks += 1
                 dashboard.set_track(
                     current_track=track.path.name,
@@ -169,7 +248,42 @@ class Pipeline:
             album, official_tracks = self.resolver.resolve(results)
             progress.advance("overall", 1)
 
+            # If no album was identified via AcoustID, and the user supplied
+            # fallback hints, try searching MusicBrainz by artist/album.
+            if album is None and (user_artist or user_album):
+                try:
+                    mb = MusicBrainzService()
+                    release = mb.search_release(user_artist, user_album)
+
+                    if release:
+                        # Construct an AlbumMatch-like object for downstream usage
+                        album = AlbumMatch(
+                            artist=release.artist,
+                            title="",
+                            album=release.album,
+                            year=release.year,
+                            release_id=release.release_id,
+                            confidence=1.0,
+                        )
+                        official_tracks = release.tracklist
+
+                        dashboard.set_status(
+                            f"Found MusicBrainz release: '{release.album}' by {release.artist} ({release.year}) — {len(release.tracklist)} tracks",
+                            "success",
+                        )
+                    else:
+                        dashboard.set_status(
+                            "No MusicBrainz release matched the provided artist/album.",
+                            "warning",
+                        )
+
+                except Exception as exc:
+                    dashboard.set_status(f"MusicBrainz search failed: {exc}", "error")
+
+                dashboard.refresh()
+
             cover = None
+            cover_path = None
             if album:
                 dashboard.set_album(
                     title=album.album,
@@ -180,40 +294,90 @@ class Pipeline:
                 dashboard.set_stage("Downloading Artwork", "Downloading album artwork")
                 dashboard.set_status("Downloading album artwork")
                 try:
-                    cover = self.coverart.download(album.release_id)
-                    dashboard.set_status("Album artwork downloaded", "success")
+                    cover = self.artwork.download_artwork(album.release_id)
+                    if cover:
+                        cover_path = self.artwork.save_cover_file(album_folder, cover)
+                        dashboard.set_status("Album artwork downloaded", "success")
+                    else:
+                        dashboard.set_status("No cover art available", "warning")
                 except Exception:
                     cover = None
+                    dashboard.set_status("Artwork download failed (continuing)", "warning")
 
-            dashboard.set_stage("Organize Tracks", "Renaming identified tracks")
+            dashboard.set_stage("Organize Tracks", "Renaming tracks using best metadata")
             dashboard.set_status("Organizing tracks")
-            for track, match in results:
+
+            # Build quick lookup of per-track matches by track number
+            match_by_number: dict[int, AlbumMatch] = {t.track_number: m for t, m in results}
+
+            total_tracks = len(tracks)
+
+            for track in tracks:
                 dashboard.set_track(current_track=track.path.name)
-                new_name = (
-                    f"{track.track_number:02d} - "
-                    f"{sanitize_filename(match.title)}.flac"
-                )
-                new_path = track.path.with_name(new_name)
-                track.path.rename(new_path)
-                track.path = new_path
 
-            if album and failed:
-                dashboard.set_stage(
-                    "Organize Tracks",
-                    "Recovering track names",
-                )
-                for track in failed:
-                    dashboard.set_track(current_track=track.path.name)
-                    number = track.track_number
-                    if number > len(official_tracks):
-                        continue
+                # Decide the best title for this track (priority order):
+                # 1) official MusicBrainz tracklist (if available)
+                # 2) per-track match title from evidence
+                # 3) leave generic name
+                chosen_title = None
 
-                    title = official_tracks[number - 1]
-                    new_name = f"{number:02d} - {sanitize_filename(title)}.flac"
+                if official_tracks and track.track_number <= len(official_tracks):
+                    chosen_title = official_tracks[track.track_number - 1]
+                else:
+                    match = match_by_number.get(track.track_number)
+                    if match and match.title:
+                        chosen_title = match.title
+
+                if chosen_title:
+                    new_name = f"{track.track_number:02d} - {sanitize_filename(chosen_title)}.flac"
                     new_path = track.path.with_name(new_name)
-                    track.path.rename(new_path)
-                    track.path = new_path
-                    dashboard.set_status(f"{number:02d} → {title}", "success")
+                    try:
+                        track.path.rename(new_path)
+                        track.path = new_path
+                        dashboard.set_status(f"Renamed → {chosen_title}", "success")
+                    except Exception as exc:
+                        dashboard.set_status(str(exc), "error")
+                else:
+                    # Keep generic name (already written as NN Track.flac)
+                    dashboard.set_status("Left generic name", "warning")
+
+                # Write tags for every exported FLAC when metadata is available
+                try:
+                    audio = FLAC(str(track.path))
+
+                    # Title
+                    if chosen_title:
+                        audio["title"] = chosen_title
+                    else:
+                        audio.setdefault("title", [f"Track {track.track_number}"])
+
+                    # Album-level metadata
+                    if album:
+                        audio["album"] = album.album
+                        audio["artist"] = album.artist
+                        if album.year:
+                            audio["date"] = album.year
+                        if album.release_id:
+                            audio["musicbrainz_releaseid"] = album.release_id
+                    else:
+                        # Populate from per-track match if available
+                        match = match_by_number.get(track.track_number)
+                        if match:
+                            if match.album:
+                                audio["album"] = match.album
+                            if match.artist:
+                                audio["artist"] = match.artist
+                            if match.year:
+                                audio["date"] = match.year
+
+                    # Track numbers
+                    audio["tracknumber"] = str(track.track_number)
+                    audio["totaltracks"] = str(total_tracks)
+
+                    audio.save()
+                    dashboard.set_status("Tagged", "success")
+                except Exception as exc:
+                    dashboard.set_status(f"Tagging failed: {exc}", "warning")
 
             progress.advance("overall", 1)
 
@@ -223,19 +387,23 @@ class Pipeline:
 
                 for track, _ in results:
                     dashboard.set_track(current_track=track.path.name)
-                    try:
-                        self.embedder.embed(str(track.path), cover)
-                        dashboard.set_status(track.path.name, "success")
-                    except Exception as exc:
-                        dashboard.set_status(str(exc), "error")
+                    if self.artwork.embed_artwork(track.path, cover):
+                        dashboard.set_status("Artwork embedded", "success")
+                    else:
+                        dashboard.set_status("Embed failed (continuing)", "warning")
 
                 for track in failed:
                     dashboard.set_track(current_track=track.path.name)
-                    try:
-                        self.embedder.embed(str(track.path), cover)
-                        dashboard.set_status(track.path.name, "success")
-                    except Exception as exc:
-                        dashboard.set_status(str(exc), "error")
+                    if self.artwork.embed_artwork(track.path, cover):
+                        dashboard.set_status("Artwork embedded", "success")
+                    else:
+                        dashboard.set_status("Embed failed (continuing)", "warning")
+
+                # Set folder icon on Linux if available
+                if cover_path:
+                    dashboard.set_stage("Finalizing", "Setting folder icon")
+                    dashboard.set_status("Setting folder icon...")
+                    self.artwork.set_folder_icon_linux(album_folder, cover_path)
 
             progress.advance("overall", 1)
             dashboard.set_stage("Complete", "Finished")

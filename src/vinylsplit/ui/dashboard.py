@@ -47,6 +47,20 @@ class Dashboard:
         self._output_directory = "Not selected"
         self._status_kind: Literal["success", "warning", "error", "info"] = "info"
         self._status_message = "Ready"
+        # Pipeline stages for display (order matters)
+        self._pipeline_stages = [
+            "Read Audio",
+            "Detect Tracks",
+            "Split Tracks",
+            "Fingerprint",
+            "Metadata Resolution",
+            "Rename Files",
+            "Embed Artwork",
+        ]
+
+        # Stage status: Pending | Running | Complete
+        self._stages: dict[str, str] = {s: "Pending" for s in self._pipeline_stages}
+        self._last_running_stage: str | None = None
 
     def set_album(
         self,
@@ -94,11 +108,48 @@ class Dashboard:
             stage: Current user-visible stage.
             operation: Current low-level operation.
         """
+        # Maintain a human-readable current stage string for compatibility
         self._current_stage = stage
         if operation is not None:
             self._current_operation = operation
 
+        # Map incoming stage names to one of our pipeline stages and update
+        canonical = self._map_stage_name(stage)
+
+        if canonical:
+            # Mark previous running stage complete when switching
+            if self._last_running_stage and self._last_running_stage != canonical:
+                self._stages[self._last_running_stage] = "Complete"
+
+            # Set this stage to running
+            self._stages[canonical] = "Running"
+            self._last_running_stage = canonical
+
         self.refresh()
+
+    def _map_stage_name(self, stage: str) -> str | None:
+        """Map arbitrary pipeline stage names to our canonical display stages.
+
+        Returns the canonical stage name, or None if no mapping is available.
+        """
+        s = stage.lower()
+
+        if "analy" in s or "read" in s:
+            return "Read Audio"
+        if "detect" in s or "silence" in s:
+            return "Detect Tracks"
+        if "write" in s or "split" in s:
+            return "Split Tracks"
+        if "identify" in s or "fingerprint" in s:
+            return "Fingerprint"
+        if "resolv" in s or "album" in s:
+            return "Metadata Resolution"
+        if "organize" in s or "rename" in s:
+            return "Rename Files"
+        if "artwork" in s or "embed" in s or "download" in s:
+            return "Embed Artwork"
+
+        return None
 
     def set_track(
         self,
@@ -229,25 +280,46 @@ class Dashboard:
         table = Table.grid(padding=(0, 1))
         table.add_column(style="dim", no_wrap=True)
         table.add_column(ratio=1, overflow="fold")
-        table.add_row("🎵 Album", self._album_title)
+        table.add_row("Album", self._album_title)
         table.add_row("Artist", self._artist)
         table.add_row("Year", self._year)
-        table.add_row("📀 Input", self._input_filename)
+        table.add_row("Input", self._input_filename)
         table.add_row("", "")
         table.add_row("Stage", self._current_stage)
         table.add_row("Track", self._current_track)
         table.add_row("Done", self._track_count_text())
         table.add_row("Now", self._current_operation)
         table.add_row("", "")
-        table.add_row("⏱ Time", self._elapsed)
+        table.add_row("Time", self._elapsed)
         table.add_row("ETA", self._eta)
+        # Include pipeline stages below the summary
+        stages_table = self._stages_table()
+
         return Panel(
-            table,
+            Group(table, stages_table),
             title="Now",
             box=box.SIMPLE,
             border_style="accent",
             padding=(0, 1),
         )
+
+    def _stages_table(self) -> Table:
+        """Render the processing pipeline stages and their statuses."""
+        table = Table.grid(padding=(0, 1))
+        table.add_column("Stage", style="bold")
+        table.add_column("Status", style="dim")
+
+        for stage in self._pipeline_stages:
+            status = self._stages.get(stage, "Pending")
+            style = "dim"
+            if status == "Running":
+                style = "yellow"
+            elif status == "Complete":
+                style = "green"
+
+            table.add_row(stage, Text(status, style=style))
+
+        return Panel(table, title="Pipeline", box=box.MINIMAL, padding=(0, 1))
 
     def _progress_panel(self) -> Panel:
         """Build the progress panel."""
@@ -261,14 +333,16 @@ class Dashboard:
 
     def _footer(self) -> Panel:
         """Build the footer panel."""
-        status = Text.assemble(
-            (self._status_icon(), self._status_kind),
-            (" ", "dim"),
-            (self._status_message, self._status_kind),
-        )
-        output = Text.assemble(("📁 Output  ", "dim"), self._output_directory)
+        output = Text.assemble(("Output: ", "dim"), self._output_directory)
+        status = Text(self._status_message, style=self._status_kind)
+
+        footer_table = Table.grid(padding=(0, 1))
+        footer_table.add_column(ratio=1)
+        footer_table.add_column(no_wrap=True)
+        footer_table.add_row(output, status)
+
         return Panel(
-            Group(output, status),
+            footer_table,
             box=box.SIMPLE,
             border_style=self._status_kind,
             padding=(0, 1),

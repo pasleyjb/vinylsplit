@@ -1,0 +1,22 @@
+Source: vinylsplit
+Section: sound
+Priority: optional
+Maintainer: Justin Pasley <you@example.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ dh-python,
+ python3-all,
+ python3-setuptools,
+ python3-build
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+
+Package: vinylsplit
+Architecture: all
+Depends:
+ ${misc:Depends},
+ ${python3:Depends}
+Description: Automatically split vinyl recordings into tagged tracks
+ VinylSplit analyzes a full-album recording, detects track boundaries,
+ identifies tracks using AcoustID/MusicBrainz, embeds metadata and artwork,
+ and exports organized FLAC files.

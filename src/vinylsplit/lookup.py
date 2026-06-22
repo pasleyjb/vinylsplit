@@ -25,17 +25,20 @@ class AlbumLookup:
         self.acoustid = AcoustIDService()
         self.musicbrainz = MusicBrainzService()
 
-    def identify_file(self, filename: str) -> AlbumMatch:
+    def identify_file(self, filename: str) -> AlbumMatch | None:
         """Fingerprint and identify a single audio file."""
 
         fingerprint = self.fingerprinter.fingerprint(filename)
 
         return self.identify(fingerprint)
 
-    def identify(self, fingerprint: Fingerprint) -> AlbumMatch:
+    def identify(self, fingerprint: Fingerprint) -> AlbumMatch | None:
         """Identify an album from an existing fingerprint."""
 
         acoustid = self.acoustid.lookup(fingerprint)
+
+        if acoustid is None:
+            return None
 
         metadata = self.musicbrainz.lookup(acoustid.recording_id)
 

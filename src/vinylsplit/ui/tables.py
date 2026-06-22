@@ -9,7 +9,7 @@ from vinylsplit.formatting import (
 
 
 def audio_info_table(info):
-    table = Table(title="🎵 Audio Information")
+    table = Table(title="Audio Information")
 
     table.add_column("Field", style="cyan", no_wrap=True)
     table.add_column("Value", style="green")
@@ -29,7 +29,7 @@ def audio_info_table(info):
 
 
 def album_table(match):
-    table = Table(title="💿 Album Identification")
+    table = Table(title="Album Identification")
 
     table.add_column("Field", style="cyan", no_wrap=True)
     table.add_column("Value", style="green")
@@ -44,7 +44,7 @@ def album_table(match):
 
 
 def track_table(tracks):
-    table = Table(title="🎼 Track Analysis")
+    table = Table(title="Track Analysis")
 
     table.add_column("#", style="cyan")
     table.add_column("Start Time", style="green")

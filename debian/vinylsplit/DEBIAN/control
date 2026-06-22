@@ -1,0 +1,11 @@
+Package: vinylsplit
+Version: 0.9.0-1
+Architecture: all
+Maintainer: Justin Pasley <you@example.com>
+Installed-Size: 289
+Section: sound
+Priority: optional
+Description: Automatically split vinyl recordings into tagged tracks
+ VinylSplit analyzes a full-album recording, detects track boundaries,
+ identifies tracks using AcoustID/MusicBrainz, embeds metadata and artwork,
+ and exports organized FLAC files.
