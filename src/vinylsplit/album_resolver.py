@@ -48,7 +48,11 @@ class AlbumResolver:
         print(f"Artist: {album.artist}")
         print(f"Release ID: {album.release_id}")
 
-        tracklist = self.musicbrainz.tracklist(album.release_id)
+        try:
+            tracklist = self.musicbrainz.tracklist(album.release_id)
+        except Exception as e:
+            print(f"Warning: MusicBrainz lookup failed: {e}")
+            tracklist = []
 
         print()
         print("Official track list:")
