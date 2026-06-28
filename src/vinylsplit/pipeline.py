@@ -1,10 +1,9 @@
-import asyncio
 from pathlib import Path
 
 from vinylsplit.audio import read_audio
 from vinylsplit.album_resolver import AlbumResolver
 from vinylsplit.services.musicbrainz import MusicBrainzService
-from vinylsplit.detection import TrackBoundary, TrackDetector
+from vinylsplit.detection import TrackDetector
 from vinylsplit.embedder import ArtworkEmbedder
 from vinylsplit.services.artwork import ArtworkService
 from mutagen.flac import FLAC
@@ -21,10 +20,11 @@ from vinylsplit.metadata_verifier import (
     UserInputMetadataProvider,
     display_verification_report,
 )
-from vinylsplit.models import AudioInfo
+from vinylsplit.models import AudioInfo, Boundary
 from vinylsplit.services.coverart import CoverArtService
 from vinylsplit.smart_identifier import SmartIdentifier
 from vinylsplit.splitter import SplitTrack, TrackSplitter
+from vinylsplit.review_session import ReviewSession
 from vinylsplit.ui.dashboard import Dashboard
 from vinylsplit.ui.progress import ProcessingProgress
 from vinylsplit.utils import sanitize_filename
@@ -42,6 +42,7 @@ class Pipeline:
         self.coverart = CoverArtService()
         self.embedder = ArtworkEmbedder()
         self.artwork = ArtworkService()
+        self.review_session: ReviewSession | None = None
         
         # Initialize MetadataVerifier with default config
         self.verifier_config = MetadataVerifierConfig(
@@ -70,8 +71,40 @@ class Pipeline:
         lookup = AlbumLookup()
         return lookup.identify(fingerprint)
 
-    def analyze(self, filename: str) -> list[TrackBoundary]:
-        return self.detector.detect(filename)
+    def analyze(
+        self,
+        filename: str,
+        expected_track_count: int | None = None,
+        expected_boundary_times: list[float] | None = None,
+        diagnostics: bool = False,
+    ) -> list[Boundary]:
+        review_session = self.create_review_session(
+            filename,
+            expected_track_count=expected_track_count,
+            expected_boundary_times=expected_boundary_times,
+            diagnostics=diagnostics,
+        )
+        return review_session.boundaries
+
+    def create_review_session(
+        self,
+        filename: str,
+        expected_track_count: int | None = None,
+        expected_boundary_times: list[float] | None = None,
+        diagnostics: bool = False,
+    ) -> ReviewSession:
+        """Analyze audio and store the resulting review session."""
+
+        boundaries = self.detector.detect(
+            filename,
+            expected_track_count=expected_track_count,
+            expected_boundary_times=expected_boundary_times,
+            diagnostics=diagnostics,
+        )
+
+        session = ReviewSession(source_file=filename, boundaries=list(boundaries))
+        self.review_session = session
+        return session
 
     def split(self, filename: str, output_directory: str) -> list[SplitTrack]:
         boundaries = self.analyze(filename)
@@ -127,9 +160,40 @@ class Pipeline:
             )
             progress.update("write_tracks", completed=0)
 
+            expected_track_count: int | None = None
+            expected_boundary_times: list[float] | None = None
+            release_from_hints: MusicBrainzService.ReleaseMatch | None = None
+
+            if user_artist or user_album:
+                try:
+                    mb = MusicBrainzService()
+                    release_from_hints = mb.search_release(user_artist, user_album)
+
+                    if release_from_hints and release_from_hints.track_durations_seconds:
+                        expected_track_count = len(release_from_hints.track_durations_seconds)
+                        expected_boundary_times = mb.expected_boundary_times(
+                            release_from_hints.track_durations_seconds
+                        )
+                        dashboard.set_status(
+                            f"Using MusicBrainz duration guidance ({expected_track_count} tracks)",
+                            "success",
+                        )
+                    elif release_from_hints:
+                        dashboard.set_status(
+                            "MusicBrainz release found without usable durations (fallback to audio-only)",
+                            "warning",
+                        )
+                except Exception as exc:
+                    dashboard.set_status(f"MusicBrainz guidance unavailable: {exc}", "warning")
+
             dashboard.set_stage("Analyzing Audio", "Reading audio")
             dashboard.set_status("Analyzing audio")
-            boundaries = self.analyze(filename)
+            review_session = self.create_review_session(
+                filename,
+                expected_track_count=expected_track_count,
+                expected_boundary_times=expected_boundary_times,
+            )
+            boundaries = review_session.boundaries
             progress.update("analyze_audio", completed=1)
             progress.advance("overall", 1)
             dashboard.refresh()
@@ -248,12 +312,26 @@ class Pipeline:
             album, official_tracks = self.resolver.resolve(results)
             progress.advance("overall", 1)
 
+            if album:
+                review_session.album_artist = album.artist
+                review_session.album_title = album.album
+                review_session.album_year = album.year
+                review_session.release_id = album.release_id
+
+            if official_tracks:
+                review_session.track_titles = list(official_tracks)
+                for index, boundary in enumerate(review_session.boundaries):
+                    if index < len(official_tracks):
+                        boundary.track_title = official_tracks[index]
+
             # If no album was identified via AcoustID, and the user supplied
             # fallback hints, try searching MusicBrainz by artist/album.
             if album is None and (user_artist or user_album):
                 try:
-                    mb = MusicBrainzService()
-                    release = mb.search_release(user_artist, user_album)
+                    release = release_from_hints
+                    if release is None:
+                        mb = MusicBrainzService()
+                        release = mb.search_release(user_artist, user_album)
 
                     if release:
                         # Construct an AlbumMatch-like object for downstream usage

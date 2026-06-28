@@ -4,7 +4,7 @@ from pathlib import Path
 
 import soundfile as sf
 
-from vinylsplit.detection import TrackBoundary
+from vinylsplit.models import Boundary
 
 
 @dataclass
@@ -23,7 +23,7 @@ class TrackSplitter:
     def split(
         self,
         filename: str,
-        boundaries: list[TrackBoundary],
+        boundaries: list[Boundary],
         output_directory: str,
         total_callback: Callable[[int], None] | None = None,
         track_callback: Callable[[SplitTrack], None] | None = None,

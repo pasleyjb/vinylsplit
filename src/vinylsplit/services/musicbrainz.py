@@ -117,6 +117,7 @@ class MusicBrainzService:
             album: The release title.
             year: The release year (YYYY) or '----' when unknown.
             tracklist: The official ordered list of track titles for the release.
+            track_durations_seconds: Ordered track durations in seconds.
         """
 
         release_id: str
@@ -124,6 +125,45 @@ class MusicBrainzService:
         album: str
         year: str
         tracklist: list[str]
+        track_durations_seconds: list[float]
+
+    def track_durations(self, release_id: str) -> list[float]:
+        """Return ordered track durations (seconds) for a MusicBrainz release."""
+
+        response = requests.get(
+            f"{self.URL}/release/{release_id}",
+            params={
+                "fmt": "json",
+                "inc": "recordings",
+            },
+            headers=self.HEADERS,
+            timeout=30,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        _, durations = self._extract_track_titles_and_durations(data.get("media", []))
+
+        return durations
+
+    def expected_boundary_times(self, track_durations_seconds: list[float]) -> list[float]:
+        """
+        Return cumulative expected boundary times from track durations.
+
+        For N tracks this returns N-1 boundary times because the last track has
+        no following transition boundary.
+        """
+
+        boundaries: list[float] = []
+        running_total = 0.0
+
+        for duration in track_durations_seconds[:-1]:
+            running_total += duration
+            boundaries.append(running_total)
+
+        return boundaries
 
     def search_release(
         self,
@@ -212,8 +252,6 @@ class MusicBrainzService:
             # Extract candidate values
             cand_title = full.get("title", "")
             cand_date = full.get("date", "")
-            cand_year = cand_date[:4] if cand_date else "----"
-            cand_status = full.get("status", "") or full.get("packaging", "")
 
             # Determine artist name
             cand_artist = "Unknown Artist"
@@ -282,11 +320,10 @@ class MusicBrainzService:
         date = best_full.get("date", "")
         year = date[:4] if date else "----"
 
-        # Build tracklist from full metadata
-        tracklist: list[str] = []
-        for medium in best_full.get("media", []):
-            for track in medium.get("tracks", []):
-                tracklist.append(track.get("title", ""))
+        # Build track metadata from full release payload
+        tracklist, track_durations_seconds = self._extract_track_titles_and_durations(
+            best_full.get("media", [])
+        )
 
         return MusicBrainzService.ReleaseMatch(
             release_id=release_id,
@@ -294,4 +331,24 @@ class MusicBrainzService:
             album=title,
             year=year,
             tracklist=tracklist,
+            track_durations_seconds=track_durations_seconds,
         )
+
+    def _extract_track_titles_and_durations(
+        self,
+        media: list[dict],
+    ) -> tuple[list[str], list[float]]:
+        """Extract ordered track titles and duration seconds from media payload."""
+
+        tracklist: list[str] = []
+        durations: list[float] = []
+
+        for medium in media:
+            for track in medium.get("tracks", []):
+                tracklist.append(track.get("title", ""))
+
+                milliseconds = track.get("length")
+                if isinstance(milliseconds, (int, float)) and milliseconds > 0:
+                    durations.append(float(milliseconds) / 1000.0)
+
+        return tracklist, durations
