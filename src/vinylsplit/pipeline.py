@@ -2,6 +2,7 @@ from pathlib import Path
 
 from vinylsplit.audio import read_audio
 from vinylsplit.album_resolver import AlbumResolver
+from vinylsplit.boundary_validation import BoundaryValidator
 from vinylsplit.services.musicbrainz import MusicBrainzService
 from vinylsplit.detection import TrackDetector
 from vinylsplit.embedder import ArtworkEmbedder
@@ -20,11 +21,15 @@ from vinylsplit.metadata_verifier import (
     UserInputMetadataProvider,
     display_verification_report,
 )
-from vinylsplit.models import AudioInfo, Boundary
+from vinylsplit.adaptive_analysis import build_local_analyzer
+from vinylsplit.boundary_states import BoundaryState
+from vinylsplit.models import AudioInfo, Boundary, ReviewSession as ReviewState
+from vinylsplit.review_state import AdaptiveReviewState
 from vinylsplit.services.coverart import CoverArtService
 from vinylsplit.smart_identifier import SmartIdentifier
 from vinylsplit.splitter import SplitTrack, TrackSplitter
-from vinylsplit.review_session import ReviewSession
+from vinylsplit.review_session import ReviewCancelledError
+from vinylsplit.review_session import ReviewSession as InteractiveReviewSession
 from vinylsplit.ui.dashboard import Dashboard
 from vinylsplit.ui.progress import ProcessingProgress
 from vinylsplit.utils import sanitize_filename
@@ -42,7 +47,8 @@ class Pipeline:
         self.coverart = CoverArtService()
         self.embedder = ArtworkEmbedder()
         self.artwork = ArtworkService()
-        self.review_session: ReviewSession | None = None
+        self.review_validator = BoundaryValidator()
+        self.review_session: AdaptiveReviewState | None = None
         
         # Initialize MetadataVerifier with default config
         self.verifier_config = MetadataVerifierConfig(
@@ -59,6 +65,75 @@ class Pipeline:
         self.verifier.register_provider(AcoustIDMetadataProvider())
         self.verifier.register_provider(MusicBrainzProvider())
         self.verifier.register_provider(FilePropertiesProvider())
+
+    def _lookup_release_guidance(
+        self,
+        artist: str | None,
+        album: str | None,
+        dashboard: Dashboard,
+    ) -> tuple[int | None, list[float] | None, MusicBrainzService.ReleaseMatch | None]:
+        """Look up MusicBrainz guidance used by metadata-aware boundary detection."""
+
+        expected_track_count: int | None = None
+        expected_boundary_times: list[float] | None = None
+        release_from_hints: MusicBrainzService.ReleaseMatch | None = None
+
+        if artist or album:
+            try:
+                mb = MusicBrainzService()
+                release_from_hints = mb.search_release(artist, album)
+
+                if release_from_hints and release_from_hints.track_durations_seconds:
+                    expected_track_count = len(release_from_hints.track_durations_seconds)
+                    expected_boundary_times = mb.expected_boundary_times(
+                        release_from_hints.track_durations_seconds
+                    )
+                    dashboard.set_status(
+                        f"Using MusicBrainz duration guidance ({expected_track_count} tracks)",
+                        "success",
+                    )
+                elif release_from_hints:
+                    dashboard.set_status(
+                        "MusicBrainz release found without usable durations (fallback to audio-only)",
+                        "warning",
+                    )
+            except Exception as exc:
+                dashboard.set_status(f"MusicBrainz guidance unavailable: {exc}", "warning")
+
+        return expected_track_count, expected_boundary_times, release_from_hints
+
+    def _run_boundary_review(
+        self,
+        filename: str,
+        review_session: AdaptiveReviewState,
+        expected_track_count: int | None,
+        dashboard: Dashboard,
+    ) -> list[Boundary] | None:
+        """Run interactive boundary review and return approved boundaries."""
+
+        info = self.inspect(filename)
+        analyzer = build_local_analyzer(filename)
+
+        dashboard.set_stage("Interactive Review", "Awaiting boundary approval")
+        dashboard.set_status("Review detected boundaries")
+        dashboard.stop()
+
+        reviewer = InteractiveReviewSession(
+            state=review_session,
+            validator=self.review_validator,
+            duration_seconds=info.duration,
+            expected_track_count=expected_track_count,
+            analyzer=analyzer,
+        )
+
+        try:
+            boundaries = reviewer.run()
+            dashboard.start()
+            return boundaries
+        except ReviewCancelledError:
+            dashboard.set_status("Cancelled before writing files", "warning")
+            dashboard.refresh()
+            return None
 
     def inspect(self, filename: str) -> AudioInfo:
         path = Path(filename)
@@ -92,8 +167,8 @@ class Pipeline:
         expected_track_count: int | None = None,
         expected_boundary_times: list[float] | None = None,
         diagnostics: bool = False,
-    ) -> ReviewSession:
-        """Analyze audio and store the resulting review session."""
+    ) -> AdaptiveReviewState:
+        """Analyze audio and return an adaptive review session."""
 
         boundaries = self.detector.detect(
             filename,
@@ -102,7 +177,16 @@ class Pipeline:
             diagnostics=diagnostics,
         )
 
-        session = ReviewSession(source_file=filename, boundaries=list(boundaries))
+        boundary_list = list(boundaries)
+        if boundary_list and boundary_list[0].start_time == 0.0:
+            boundary_list[0].state = BoundaryState.LOCKED
+            if not boundary_list[0].reasons:
+                boundary_list[0].reasons = ["Recording start boundary"]
+
+        session = AdaptiveReviewState(
+            source_file=filename,
+            boundaries=boundary_list,
+        )
         self.review_session = session
         return session
 
@@ -133,13 +217,6 @@ class Pipeline:
         user_artist = artist
         user_album = album
 
-        # Create album folder that will hold all exports
-        album_folder = self.artwork.create_album_folder(
-            output_directory=output_directory,
-            artist=user_artist,
-            album=user_album,
-        )
-
         try:
             overall_stages = (
                 "analyze_audio",
@@ -160,31 +237,11 @@ class Pipeline:
             )
             progress.update("write_tracks", completed=0)
 
-            expected_track_count: int | None = None
-            expected_boundary_times: list[float] | None = None
-            release_from_hints: MusicBrainzService.ReleaseMatch | None = None
-
-            if user_artist or user_album:
-                try:
-                    mb = MusicBrainzService()
-                    release_from_hints = mb.search_release(user_artist, user_album)
-
-                    if release_from_hints and release_from_hints.track_durations_seconds:
-                        expected_track_count = len(release_from_hints.track_durations_seconds)
-                        expected_boundary_times = mb.expected_boundary_times(
-                            release_from_hints.track_durations_seconds
-                        )
-                        dashboard.set_status(
-                            f"Using MusicBrainz duration guidance ({expected_track_count} tracks)",
-                            "success",
-                        )
-                    elif release_from_hints:
-                        dashboard.set_status(
-                            "MusicBrainz release found without usable durations (fallback to audio-only)",
-                            "warning",
-                        )
-                except Exception as exc:
-                    dashboard.set_status(f"MusicBrainz guidance unavailable: {exc}", "warning")
+            expected_track_count, expected_boundary_times, release_from_hints = self._lookup_release_guidance(
+                user_artist,
+                user_album,
+                dashboard,
+            )
 
             dashboard.set_stage("Analyzing Audio", "Reading audio")
             dashboard.set_status("Analyzing audio")
@@ -193,7 +250,34 @@ class Pipeline:
                 expected_track_count=expected_track_count,
                 expected_boundary_times=expected_boundary_times,
             )
-            boundaries = review_session.boundaries
+
+            if release_from_hints:
+                review_session.album_artist = getattr(release_from_hints, "artist", None)
+                review_session.album_title = getattr(release_from_hints, "album", None)
+                review_session.album_year = getattr(release_from_hints, "year", None)
+                review_session.release_id = getattr(release_from_hints, "release_id", None)
+                tracklist = getattr(release_from_hints, "tracklist", None)
+                if tracklist:
+                    review_session.track_titles = list(tracklist)
+                durations = getattr(release_from_hints, "track_durations_seconds", None)
+                if durations:
+                    review_session.expected_track_durations_seconds = list(durations)
+
+            boundaries = self._run_boundary_review(
+                filename,
+                review_session,
+                expected_track_count,
+                dashboard,
+            )
+            if boundaries is None:
+                return []
+
+            # Create album folder only after approval to avoid partial outputs.
+            album_folder = self.artwork.create_album_folder(
+                output_directory=output_directory,
+                artist=user_artist,
+                album=user_album,
+            )
             progress.update("analyze_audio", completed=1)
             progress.advance("overall", 1)
             dashboard.refresh()

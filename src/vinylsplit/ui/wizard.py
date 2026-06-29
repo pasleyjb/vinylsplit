@@ -3,14 +3,11 @@
 import asyncio
 from pathlib import Path
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
-from rich.table import Table
 
 from vinylsplit.pipeline import Pipeline
 from vinylsplit.services.musicbrainz import MusicBrainzService
-from vinylsplit.audio import read_audio
 from vinylsplit.ui.banner import show_banner
 from vinylsplit.ui.console import console
 from vinylsplit.ui.tables import audio_info_table, album_table

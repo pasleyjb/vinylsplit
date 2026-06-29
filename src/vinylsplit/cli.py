@@ -72,7 +72,7 @@ def process(
         help="Album title to use when AcoustID lookup fails.",
     ),
 ) -> None:
-    """Process an album recording."""
+    """Process an album recording with interactive track review before export."""
 
     ui.info("Processing album...")
 
@@ -84,6 +84,10 @@ def process(
             album=album,
         )
     )
+
+    if not results:
+        ui.warning("Processing stopped before export.")
+        return
 
     ui.success(f"Finished. Successfully processed {len(results)} tracks.")
 

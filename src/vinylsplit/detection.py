@@ -201,6 +201,7 @@ class TrackDetector:
             TrackBoundary(
                 track_number=1,
                 start_time=0.0,
+                reasons=["Recording start boundary"],
             )
         ]
 
@@ -221,6 +222,7 @@ class TrackDetector:
                 TrackBoundary(
                     track_number=len(boundaries) + 1,
                     start_time=start_time,
+                    reasons=["Silence detected"],
                 )
             )
 
@@ -416,13 +418,23 @@ class TrackDetector:
     ) -> list[TrackBoundary]:
         """Generate track boundaries from selected silence candidates."""
 
-        boundaries = [TrackBoundary(track_number=1, start_time=0.0)]
+        boundaries = [
+            TrackBoundary(
+                track_number=1,
+                start_time=0.0,
+                reasons=["Recording start boundary"],
+            )
+        ]
 
         for candidate in selected_candidates:
             boundaries.append(
                 TrackBoundary(
                     track_number=len(boundaries) + 1,
                     start_time=candidate.start_time,
+                    reasons=[
+                        "Silence detected",
+                        "Matches expected track duration",
+                    ],
                 )
             )
 

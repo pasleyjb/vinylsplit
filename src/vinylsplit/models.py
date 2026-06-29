@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+from vinylsplit.boundary_states import BoundaryState
+
 
 @dataclass(slots=True)
 class Boundary:
@@ -14,7 +16,46 @@ class Boundary:
     detector_confidence: float | None = None
     silence_duration: float | None = None
     detector_score: float | None = None
-    review_status: str = "automatic"
+    reasons: list[str] = field(default_factory=list)
+    state: BoundaryState = field(default_factory=lambda: BoundaryState.AUTO)
+
+    # ---------------------------------------------------------------------------
+    # Backward-compatible shims — callers that set locked=True or read
+    # review_status still work, but new code should use .state directly.
+    # ---------------------------------------------------------------------------
+
+    @property
+    def locked(self) -> bool:
+        """True when this boundary is user-controlled and must not be moved."""
+        return self.state.is_user_controlled()
+
+    @locked.setter
+    def locked(self, value: bool) -> None:
+        if value:
+            self.state = BoundaryState.LOCKED
+        elif self.state is BoundaryState.LOCKED:
+            self.state = BoundaryState.AUTO
+
+    @property
+    def review_status(self) -> str:
+        """Legacy string review status derived from current state."""
+        _map = {
+            BoundaryState.AUTO: "automatic",
+            BoundaryState.LOCKED: "edited",
+            BoundaryState.VERIFIED: "accepted",
+            BoundaryState.SUGGESTED: "suggested",
+        }
+        return _map[self.state]
+
+    @review_status.setter
+    def review_status(self, value: str) -> None:
+        _map = {
+            "automatic": BoundaryState.AUTO,
+            "edited": BoundaryState.LOCKED,
+            "accepted": BoundaryState.VERIFIED,
+            "suggested": BoundaryState.SUGGESTED,
+        }
+        self.state = _map.get(value, BoundaryState.AUTO)
 
     def __post_init__(self) -> None:
         if self.detected_boundary is None:
@@ -29,17 +70,38 @@ class Boundary:
 
         return self.start_time
 
+    @property
+    def index(self) -> int:
+        """Compatibility alias for the boundary index."""
+
+        return self.track_number
+
+    @property
+    def timestamp(self) -> float:
+        """Compatibility alias for the boundary timestamp."""
+
+        return self.start_time
+
+    @property
+    def confidence(self) -> float:
+        """Return normalized confidence value for review and validation."""
+
+        if self.detector_confidence is None:
+            return 1.0
+
+        return self.detector_confidence
+
     def move_to(self, new_time: float) -> None:
-        """Update the boundary after a user edit."""
+        """Update the boundary after a user edit and lock it."""
 
         self.start_time = new_time
         self.edited_boundary = new_time
-        self.review_status = "edited"
+        self.state = BoundaryState.LOCKED
 
     def accept(self) -> None:
-        """Mark the boundary as accepted."""
+        """Mark the boundary as user-verified."""
 
-        self.review_status = "accepted"
+        self.state = BoundaryState.VERIFIED
 
 
 @dataclass(slots=True)
@@ -81,9 +143,11 @@ class ReviewSession:
         return self.boundaries[index]
 
     def move_boundary(self, index: int, new_time: float) -> Boundary:
-        """Move a boundary and mark it as edited."""
+        """Move a boundary and lock it."""
 
         boundary = self.boundaries[index]
+        if boundary.locked:
+            raise ValueError("Cannot move a locked boundary")
         boundary.move_to(new_time)
         self.selected_boundary_index = index
         return boundary
@@ -100,7 +164,7 @@ class ReviewSession:
         """Accept all remaining boundaries."""
 
         for boundary in self.boundaries:
-            if boundary.review_status not in {"accepted", "edited"}:
+            if boundary.state not in {BoundaryState.VERIFIED, BoundaryState.LOCKED}:
                 boundary.accept()
 
         self.completed = True
@@ -117,9 +181,17 @@ class ReviewSession:
         return None
 
     def edited_boundaries(self) -> list[Boundary]:
-        """Return edited boundaries."""
+        """Return boundaries the user has manually positioned."""
 
-        return [boundary for boundary in self.boundaries if boundary.review_status == "edited"]
+        return [boundary for boundary in self.boundaries if boundary.state is BoundaryState.LOCKED]
+
+    def normalize_track_numbers(self) -> None:
+        """Normalize track numbers to reflect sorted boundary order."""
+
+        self.boundaries.sort(key=lambda boundary: boundary.start_time)
+
+        for number, boundary in enumerate(self.boundaries, start=1):
+            boundary.track_number = number
 
 
 @dataclass
