@@ -312,8 +312,12 @@ class ReviewSession:
         self._render()
 
     def _cmd_refine(self, args: list[str]) -> None:
+        debug = False
         if args:
-            raise ValueError("Usage: refine")
+            if len(args) == 1 and args[0] == "--debug":
+                debug = True
+            else:
+                raise ValueError("Usage: refine [--debug]")
 
         if self._analyzer is None:
             console.print("[warning]Refinement unavailable for this session.[/warning]")
@@ -328,6 +332,7 @@ class ReviewSession:
                 state=state,
                 duration_seconds=self._duration,
                 minimum_spacing_seconds=self._validator.config.minimum_spacing_seconds,
+                debug=debug,
             )
 
         self._state.apply_edit(_mutate)
@@ -343,6 +348,9 @@ class ReviewSession:
             f"Boundaries improved: {summary.boundaries_improved}",
             f"Validation warnings: {summary.validation_warnings}",
         ]
+        if summary.diagnostics:
+            lines.extend(["", "[header]Optimizer Diagnostics[/header]"])
+            lines.extend(summary.diagnostics)
         console.print(Panel("\n".join(lines), title="Refinement", border_style="accent"))
 
         self._render()
@@ -500,8 +508,9 @@ class ReviewSession:
             "    Move the end of a track.  Locks the next boundary.\n\n"
             "verify <track>\n"
             "    Mark a boundary as verified, or apply a pending suggestion.\n\n"
-            "refine\n"
-            "    Improve AUTO boundaries using locked anchors.\n\n"
+            "refine [--debug]\n"
+            "    Improve AUTO boundaries using locked anchors.\n"
+            "    Use --debug for detailed optimizer diagnostics.\n\n"
             "add <time>\n"
             "    Insert a track at the given time.\n\n"
             "delete <track>\n"

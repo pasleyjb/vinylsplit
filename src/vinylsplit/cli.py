@@ -2,14 +2,14 @@ import asyncio
 
 import typer
 
-from vinylsplit.pipeline import Pipeline
+from vinylsplit.application import build_application_context
 from vinylsplit.ui import ui
 from vinylsplit.ui.wizard import run_interactive_wizard
 from vinylsplit.version import __version__
 
 app = typer.Typer(help="Inspect, identify, and process audio album recordings.")
 
-pipeline = Pipeline()
+application = build_application_context()
 
 
 @app.callback(invoke_without_command=True)
@@ -23,7 +23,7 @@ def callback(ctx: typer.Context) -> None:
 def inspect(filename: str) -> None:
     """Inspect an audio file."""
 
-    info = pipeline.inspect(filename)
+    info = application.analyze_controller.inspect(filename)
     ui.audio_info(info)
 
 
@@ -31,7 +31,8 @@ def inspect(filename: str) -> None:
 def identify(filename: str) -> None:
     """Identify an audio recording."""
 
-    match = pipeline.identify(filename)
+    metadata = application.analyze_controller.lookup_metadata(filename)
+    match = metadata.match
     if match is None:
         ui.warning(
             "No AcoustID match was found for this recording. "
@@ -48,7 +49,7 @@ def identify(filename: str) -> None:
 def analyze(filename: str) -> None:
     """Analyze an album recording."""
 
-    tracks = pipeline.analyze(filename)
+    tracks = application.analyze_controller.analyze_file(filename).boundaries
     ui.tracks(tracks)
 
 
@@ -77,7 +78,7 @@ def process(
     ui.info("Processing album...")
 
     results = asyncio.run(
-        pipeline.process(
+        application.export_controller.export(
             filename=filename,
             output_directory=output,
             artist=artist,
@@ -85,11 +86,11 @@ def process(
         )
     )
 
-    if not results:
+    if results.stopped:
         ui.warning("Processing stopped before export.")
         return
 
-    ui.success(f"Finished. Successfully processed {len(results)} tracks.")
+    ui.success(f"Finished. Successfully processed {len(results.results)} tracks.")
 
 
 @app.command()
