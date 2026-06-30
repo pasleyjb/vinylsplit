@@ -30,6 +30,8 @@ class BoundarySelectionConfidence:
     distance_from_expected: float
     score: float
     confidence: float
+    search_radius: float = 20.0
+    """The search radius used to find this candidate (for component decomposition)."""
 
 
 class TrackDetector:
@@ -349,6 +351,7 @@ class TrackDetector:
                     distance_from_expected=distance,
                     score=score,
                     confidence=confidence,
+                    search_radius=selected_radius,
                 )
             )
 
@@ -505,7 +508,8 @@ class TrackDetector:
             # Build confidence breakdown
             if confidence_info:
                 silence_score = min(1.0, selected.silence_duration / 6.0)
-                distance_score = max(0.0, 1.0 - (confidence_info.distance_from_expected / 20.0))
+                # Properly compute distance component using actual search radius
+                distance_score = max(0.0, 1.0 - (confidence_info.distance_from_expected / confidence_info.search_radius))
                 breakdown = ConfidenceBreakdown(
                     silence_score=silence_score,
                     distance_score=distance_score,
