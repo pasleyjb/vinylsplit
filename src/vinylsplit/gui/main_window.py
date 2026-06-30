@@ -139,8 +139,11 @@ class MainWindow(QMainWindow):
                 and path.is_file()
                 and path.suffix.lower() in self._SUPPORTED_AUDIO_EXTENSIONS
             ):
-                self._workspace_manager.switch_to("focused")
-                self._focused_workspace.load_recording(str(path))
+                active_workspace = self._workspace_manager.state.active_workspace
+                if active_workspace == "studio":
+                    self._studio_workspace.load_recording(str(path))
+                else:
+                    self._focused_workspace.load_recording(str(path))
                 event.acceptProposedAction()
                 return
 

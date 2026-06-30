@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vinylsplit.application.dto.review import ReviewSessionDTO
 from vinylsplit.application.dto.review_result import ReviewResult
 from vinylsplit.application.interfaces.services import ReviewServiceInterface
 
@@ -25,3 +26,11 @@ class ReviewController:
             expected_boundary_times=expected_boundary_times,
             diagnostics=diagnostics,
         )
+
+    def get_session_dto(self) -> ReviewSessionDTO | None:
+        """Return current review session as DTO when supported by the service."""
+
+        get_session = getattr(self._review_service, "get_session_dto", None)
+        if callable(get_session):
+            return get_session()
+        return None
