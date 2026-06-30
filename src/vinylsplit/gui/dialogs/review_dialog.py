@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from vinylsplit.application.dto.review import ReviewSessionDTO, ReviewBoundaryDTO
+from vinylsplit.gui.widgets.review_waveform import ReviewWaveformView
 
 
 class ReviewDialog(QDialog):
@@ -60,13 +61,16 @@ class ReviewDialog(QDialog):
         top_split.setStretchFactor(1, 2)
         top_split.setSizes([760, 430])
 
-        bottom_panel = self._build_waveform_placeholder()
+        self._bottom_container = QWidget()
+        self._bottom_layout = QVBoxLayout(self._bottom_container)
+        self._bottom_layout.setContentsMargins(0, 0, 0, 0)
+
         toolbar = self._build_toolbar()
 
         root.addWidget(title)
         root.addWidget(intro)
         root.addWidget(top_split, stretch=4)
-        root.addWidget(bottom_panel, stretch=2)
+        root.addWidget(self._bottom_container, stretch=2)
         root.addLayout(toolbar)
 
         self._populate_tracks_table()
@@ -250,6 +254,9 @@ class ReviewDialog(QDialog):
             _set_info_card(self._method_card, "--")
             _set_info_card(self._status_card, "--")
             _set_info_card(self._notes_card, "No selection")
+            # Clear waveform
+            while self._bottom_layout.count():
+                self._bottom_layout.takeAt(0).widget().deleteLater()
             return
 
         row = selected_rows[0].row()
@@ -300,6 +307,33 @@ class ReviewDialog(QDialog):
             candidates_display += "\n".join(boundary_dto.notes)
         
         _set_info_card(self._notes_card, candidates_display if candidates_display else "No additional notes")
+
+        # Update waveform view with backend candidates
+        duration = end if end is not None else 0.0
+        self._update_waveform_view(boundary_dto, duration)
+
+    def _update_waveform_view(self, boundary_dto: ReviewBoundaryDTO, duration: float) -> None:
+        """Update waveform visualization with backend candidates."""
+        # Clear existing waveform
+        while self._bottom_layout.count():
+            widget = self._bottom_layout.takeAt(0).widget()
+            if widget:
+                widget.deleteLater()
+
+        # Create new waveform view if boundary has candidates
+        if boundary_dto.candidates:
+            waveform = ReviewWaveformView(boundary_dto, duration or 60.0)
+            waveform.candidate_selected.connect(self._on_waveform_candidate_selected)
+            self._bottom_layout.addWidget(waveform)
+        else:
+            # Show placeholder if no candidates
+            placeholder = self._build_waveform_placeholder()
+            self._bottom_layout.addWidget(placeholder)
+
+    def _on_waveform_candidate_selected(self, timestamp: float) -> None:
+        """Handle candidate selection from waveform."""
+        # In future, this will update the selected boundary to the clicked candidate
+        pass
 
     def _reset_selection(self) -> None:
         if self._tracks_table.rowCount() > 0:
