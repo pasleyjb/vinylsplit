@@ -15,28 +15,36 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vinylsplit.application.dto.review import ReviewSessionDTO, ReviewBoundaryDTO
+
 
 class ReviewDialog(QDialog):
-    """Boundary review dialog that serves as the visual foundation for future editing."""
+    """Boundary review workstation using backend-provided DTOs.
+    
+    Displays only data from the backend ReviewSessionDTO.
+    No synthetic candidates, no fabricated confidence values.
+    All information produced by VinylSplit analysis.
+    """
 
-    def __init__(self, boundaries: tuple[object, ...], parent: QDialog | None = None) -> None:
+    def __init__(self, session_dto: ReviewSessionDTO, parent: QDialog | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Boundary Review")
+        self.setWindowTitle("Boundary Review Workstation")
         self.setModal(True)
         self.resize(1240, 780)
 
-        self._boundaries = tuple(boundaries)
+        self._session_dto = session_dto
+        self._boundaries = session_dto.boundaries
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
         root.setSpacing(12)
 
-        title = QLabel("Boundary Review")
+        title = QLabel("Boundary Review Workstation")
         title.setObjectName("SectionTitle")
 
         intro = QLabel(
             "Review detected boundaries before splitting. "
-            "Select a track to inspect timing and confidence details."
+            "Select a track to inspect timing, confidence, detection evidence, and candidates."
         )
         intro.setObjectName("StatusBarText")
         intro.setWordWrap(True)
@@ -152,23 +160,24 @@ class ReviewDialog(QDialog):
         layout.setContentsMargins(26, 24, 26, 24)
         layout.setSpacing(10)
 
-        title = QLabel("Waveform Editor")
+        title = QLabel("Waveform Editor (Future)")
         title.setObjectName("SectionTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        subtitle = QLabel("Coming Soon")
+        subtitle = QLabel("Backend-Driven Waveform Display Coming Soon")
         subtitle.setObjectName("StatusBarText")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         capabilities = QLabel(
-            "Future capabilities\n"
-            "• Zoom\n"
-            "• Playback Preview\n"
-            "• Boundary Dragging\n"
-            "• Spectrogram Overlay\n"
-            "• Keyboard Shortcuts\n"
-            "• Undo / Redo\n"
-            "• Precision Editing"
+            "This waveform will display:\n"
+            "• Detected candidates from backend (no synthesis)\n"
+            "• Per-detector confidence visualization\n"
+            "• Spectrogram overlay with boundary confidence\n"
+            "• Click-to-select candidates\n"
+            "• Drag-to-refine selected boundary\n"
+            "• Metadata guidance overlay\n"
+            "• Keyboard navigation & shortcuts\n"
+            "• Undo / Redo support"
         )
         capabilities.setAlignment(Qt.AlignmentFlag.AlignCenter)
         capabilities.setObjectName("StatusBarText")
@@ -205,39 +214,31 @@ class ReviewDialog(QDialog):
         return layout
 
     def _populate_tracks_table(self) -> None:
-        boundaries = list(self._boundaries)
-        self._tracks_table.setRowCount(len(boundaries))
+        """Populate table from backend ReviewBoundaryDTO objects."""
+        self._tracks_table.setRowCount(len(self._boundaries))
 
-        for row, boundary in enumerate(boundaries):
-            start = float(getattr(boundary, "start_time", 0.0))
+        for row, boundary_dto in enumerate(self._boundaries):
+            start = boundary_dto.selected_timestamp
             end = self._track_end_seconds(row)
             length = max(0.0, end - start) if end is not None else None
-            confidence = getattr(boundary, "detector_confidence", None)
-            status = getattr(getattr(boundary, "state", None), "display_label", None)
+            confidence_pct = boundary_dto.confidence_pct
+            status = boundary_dto.status_indicator
 
-            self._tracks_table.setItem(row, 0, QTableWidgetItem(str(getattr(boundary, "track_number", row + 1))))
+            self._tracks_table.setItem(row, 0, QTableWidgetItem(str(boundary_dto.track_number)))
             self._tracks_table.setItem(row, 1, QTableWidgetItem(_format_timestamp(start)))
             self._tracks_table.setItem(row, 2, QTableWidgetItem(_format_timestamp(end) if end is not None else "--"))
             self._tracks_table.setItem(row, 3, QTableWidgetItem(_format_duration(length) if length is not None else "--"))
-            self._tracks_table.setItem(
-                row,
-                4,
-                QTableWidgetItem(f"{confidence * 100:.0f}%" if confidence is not None else "--"),
-            )
-            self._tracks_table.setItem(
-                row,
-                5,
-                QTableWidgetItem(
-                    status(confidence) if callable(status) else str(getattr(boundary, "state", "AUTO"))
-                ),
-            )
+            self._tracks_table.setItem(row, 4, QTableWidgetItem(f"{confidence_pct}%"))
+            self._tracks_table.setItem(row, 5, QTableWidgetItem(status))
 
     def _track_end_seconds(self, row: int) -> float | None:
+        """Get end time as start of next track."""
         if row + 1 < len(self._boundaries):
-            return float(getattr(self._boundaries[row + 1], "start_time", 0.0))
+            return self._boundaries[row + 1].selected_timestamp
         return None
 
     def _on_selection_changed(self) -> None:
+        """Update inspector when boundary selection changes."""
         selected_rows = self._tracks_table.selectionModel().selectedRows()
         if not selected_rows:
             self._selection_label.setText("Current selection: none")
@@ -252,15 +253,12 @@ class ReviewDialog(QDialog):
             return
 
         row = selected_rows[0].row()
-        boundary = self._boundaries[row]
+        boundary_dto = self._boundaries[row]
 
-        track_number = getattr(boundary, "track_number", row + 1)
-        start = float(getattr(boundary, "start_time", 0.0))
+        track_number = boundary_dto.track_number
+        start = boundary_dto.selected_timestamp
         end = self._track_end_seconds(row)
         length = max(0.0, end - start) if end is not None else None
-        confidence = getattr(boundary, "detector_confidence", None)
-        reasons = getattr(boundary, "reasons", None) or []
-        state = getattr(boundary, "state", None)
 
         self._selection_label.setText(f"Current selection: Track {track_number}")
 
@@ -268,16 +266,40 @@ class ReviewDialog(QDialog):
         _set_info_card(self._start_card, _format_timestamp(start))
         _set_info_card(self._end_card, _format_timestamp(end) if end is not None else "End of recording")
         _set_info_card(self._length_card, _format_duration(length) if length is not None else "--")
-        _set_info_card(self._confidence_card, f"{confidence * 100:.0f}%" if confidence is not None else "--")
-        _set_info_card(self._method_card, reasons[0] if reasons else "Silence-guided detection")
-        _set_info_card(
-            self._status_card,
-            state.display_label(confidence) if state is not None and hasattr(state, "display_label") else "AUTO",
-        )
-        _set_info_card(
-            self._notes_card,
-            "; ".join(reasons) if reasons else "No additional notes for this boundary.",
-        )
+
+        # Display confidence breakdown from backend
+        if boundary_dto.confidence:
+            confidence_text = f"{boundary_dto.confidence.overall * 100:.0f}%"
+            if boundary_dto.confidence.display_breakdown != "Unknown":
+                confidence_text += f"\n({boundary_dto.confidence.display_breakdown})"
+            _set_info_card(self._confidence_card, confidence_text)
+        else:
+            _set_info_card(self._confidence_card, "--")
+
+        # Display detection method and evidence
+        if boundary_dto.evidence:
+            _set_info_card(self._method_card, boundary_dto.evidence.method)
+        else:
+            _set_info_card(self._method_card, "No detection evidence")
+
+        # Display status
+        status_text = boundary_dto.status_indicator
+        if boundary_dto.is_verified:
+            status_text += " Verified"
+        elif boundary_dto.is_locked:
+            status_text += " Locked"
+        _set_info_card(self._status_card, status_text)
+
+        # Display all candidate boundaries from backend
+        candidates_display = ""
+        if boundary_dto.candidates:
+            candidates_display = "Detected candidates:\n"
+            for candidate in boundary_dto.candidates[:5]:  # Show top 5
+                candidates_display += f"  • {candidate.display_label}\n"
+        if boundary_dto.notes:
+            candidates_display += "\n".join(boundary_dto.notes)
+        
+        _set_info_card(self._notes_card, candidates_display if candidates_display else "No additional notes")
 
     def _reset_selection(self) -> None:
         if self._tracks_table.rowCount() > 0:
