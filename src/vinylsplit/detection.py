@@ -6,6 +6,7 @@ import numpy as np
 import soundfile as sf
 
 from vinylsplit.models import Boundary
+from vinylsplit.review_candidate import ReviewCandidate, ConfidenceBreakdown
 
 
 TrackBoundary = Boundary
@@ -83,14 +84,14 @@ class TrackDetector:
             expected_boundary_times=expected_boundary_times,
         )
 
-        selected_candidates, confidence_rows = self.select_candidates_for_expected_boundaries(
+        selected_with_alts, confidence_rows = self.select_candidates_for_expected_boundaries(
             candidates=candidates,
             expected_boundary_times=normalized_expected,
             diagnostics=diagnostics,
         )
         self.last_selection_confidence = confidence_rows
 
-        return self.generate_boundaries_from_selected_candidates(selected_candidates)
+        return self.generate_boundaries_from_selected_with_alternatives(selected_with_alts, confidence_rows)
 
     def load_audio(self, filename: str):
         """Load audio samples and sample rate from disk."""
@@ -202,6 +203,7 @@ class TrackDetector:
                 track_number=1,
                 start_time=0.0,
                 reasons=["Recording start boundary"],
+                detection_evidence=["Recording start (locked at 0.0s)"],
             )
         ]
 
@@ -218,11 +220,33 @@ class TrackDetector:
             if (start_time - last_boundary) < minimum_track_seconds:
                 continue
 
+            # Build single candidate (the selected one)
+            candidates_for_boundary = [
+                ReviewCandidate(
+                    timestamp=candidate.start_time,
+                    confidence=1.0,
+                    reason="Silence detected (audio-only)"
+                )
+            ]
+            
+            # Build confidence breakdown
+            breakdown = ConfidenceBreakdown(
+                silence_score=min(1.0, candidate.silence_duration / 6.0),
+                distance_score=0.0,  # No metadata guidance
+                overall=min(1.0, candidate.silence_duration / 6.0),
+            )
+
             boundaries.append(
                 TrackBoundary(
                     track_number=len(boundaries) + 1,
                     start_time=start_time,
                     reasons=["Silence detected"],
+                    candidate_boundaries=candidates_for_boundary,
+                    detection_evidence=[
+                        f"Silence: {candidate.silence_duration:.2f}s",
+                        "Method: Audio-only silence detection",
+                    ],
+                    confidence_breakdown=breakdown,
                 )
             )
 
@@ -249,9 +273,13 @@ class TrackDetector:
         candidates: list[SilenceCandidate],
         expected_boundary_times: list[float],
         diagnostics: bool,
-    ) -> tuple[list[SilenceCandidate], list[BoundarySelectionConfidence]]:
+    ) -> tuple[list[tuple[SilenceCandidate, list[SilenceCandidate]]], list[BoundarySelectionConfidence]]:
         """
         Select silence candidates guided by expected boundary times.
+
+        Returns tuple of:
+        - Selected candidates with their alternate candidates: list of (selected, all_nearby_candidates)
+        - Confidence rows for each selection
 
         Selection rules:
         - One candidate can satisfy at most one expected boundary.
@@ -267,7 +295,7 @@ class TrackDetector:
         candidate_times = [candidate.start_time for candidate in ordered_candidates]
 
         used_indexes: set[int] = set()
-        selected_candidates: list[SilenceCandidate] = []
+        selected_with_candidates: list[tuple[SilenceCandidate, list[SilenceCandidate]]] = []
         confidence_rows: list[BoundarySelectionConfidence] = []
         last_selected_time = 0.0
 
@@ -289,8 +317,17 @@ class TrackDetector:
             used_indexes.add(selected_index)
 
             selected = ordered_candidates[selected_index]
-            selected_candidates.append(selected)
             last_selected_time = selected.start_time
+
+            # Collect all nearby candidates as alternatives
+            nearby_indexes = self._nearby_candidate_indexes(
+                expected_boundary=expected_boundary,
+                candidate_times=candidate_times,
+                search_radius=selected_radius,
+            )
+            nearby_candidates = [ordered_candidates[idx] for idx in nearby_indexes if idx not in {selected_index}]
+
+            selected_with_candidates.append((selected, nearby_candidates))
 
             score = self.score_candidate(
                 candidate=selected,
@@ -315,7 +352,7 @@ class TrackDetector:
                 )
             )
 
-        return selected_candidates, confidence_rows
+        return selected_with_candidates, confidence_rows
 
     def _select_candidate_for_expected_boundary(
         self,
@@ -412,29 +449,96 @@ class TrackDetector:
 
         return min(1.0, (0.65 * distance_component) + (0.35 * silence_component))
 
-    def generate_boundaries_from_selected_candidates(
+    def generate_boundaries_from_selected_with_alternatives(
         self,
-        selected_candidates: list[SilenceCandidate],
+        selected_with_candidates: list[tuple[SilenceCandidate, list[SilenceCandidate]]],
+        confidence_rows: list[BoundarySelectionConfidence],
     ) -> list[TrackBoundary]:
-        """Generate track boundaries from selected silence candidates."""
+        """Generate boundaries from selected candidates with all alternates and confidence data."""
 
         boundaries = [
             TrackBoundary(
                 track_number=1,
                 start_time=0.0,
                 reasons=["Recording start boundary"],
+                detection_evidence=["Recording start (locked at 0.0s)"],
             )
         ]
 
-        for candidate in selected_candidates:
+        for idx, (selected, alternates) in enumerate(selected_with_candidates):
+            # Get confidence info for this boundary
+            confidence_info = confidence_rows[idx] if idx < len(confidence_rows) else None
+            
+            # Build all candidates (selected + alternates)
+            all_review_candidates = [
+                ReviewCandidate(
+                    timestamp=selected.start_time,
+                    confidence=1.0,  # Selected gets highest score
+                    reason="Best match for expected boundary"
+                )
+            ]
+            
+            # Add alternates with their scoring
+            for alt in alternates:
+                if confidence_info:
+                    # Estimate confidence for alternate based on distance
+                    alt_distance = abs(alt.start_time - confidence_info.expected_boundary)
+                    alt_confidence = self.calculate_confidence(
+                        candidate=alt,
+                        distance=alt_distance,
+                        search_radius=max(1.0, abs(selected.start_time - alt.start_time)),
+                    )
+                else:
+                    alt_confidence = min(1.0, alt.silence_duration / 6.0)
+                
+                all_review_candidates.append(
+                    ReviewCandidate(
+                        timestamp=alt.start_time,
+                        confidence=alt_confidence,
+                        reason="Alternate silence candidate"
+                    )
+                )
+            
+            # Sort by confidence descending (selected first)
+            all_review_candidates = sorted(all_review_candidates, key=lambda c: c.confidence, reverse=True)
+            
+            # Build confidence breakdown
+            if confidence_info:
+                silence_score = min(1.0, selected.silence_duration / 6.0)
+                distance_score = max(0.0, 1.0 - (confidence_info.distance_from_expected / 20.0))
+                breakdown = ConfidenceBreakdown(
+                    silence_score=silence_score,
+                    distance_score=distance_score,
+                    overall=confidence_info.confidence,
+                )
+                evidence = [
+                    f"Silence: {selected.silence_duration:.2f}s",
+                    f"Distance from expected: {confidence_info.distance_from_expected:.2f}s",
+                    f"Score: {confidence_info.score:.2f}",
+                ]
+            else:
+                silence_score = min(1.0, selected.silence_duration / 6.0)
+                breakdown = ConfidenceBreakdown(
+                    silence_score=silence_score,
+                    distance_score=0.0,
+                    overall=silence_score,
+                )
+                evidence = [
+                    f"Silence: {selected.silence_duration:.2f}s",
+                ]
+
             boundaries.append(
                 TrackBoundary(
                     track_number=len(boundaries) + 1,
-                    start_time=candidate.start_time,
+                    start_time=selected.start_time,
                     reasons=[
                         "Silence detected",
-                        "Matches expected track duration",
+                        "Matches expected track duration" if confidence_info else "Audio-guided detection",
                     ],
+                    candidate_boundaries=all_review_candidates,
+                    detection_evidence=evidence,
+                    confidence_breakdown=breakdown,
+                    detector_confidence=confidence_info.confidence if confidence_info else silence_score,
                 )
             )
 

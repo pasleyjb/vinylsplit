@@ -18,6 +18,13 @@ class Boundary:
     detector_score: float | None = None
     reasons: list[str] = field(default_factory=list)
     state: BoundaryState = field(default_factory=lambda: BoundaryState.AUTO)
+    # Review-quality information populated by backend
+    candidate_boundaries: list = field(default_factory=list)
+    """All candidate boundaries detected (list of ReviewCandidate). Populated by detection pipeline."""
+    detection_evidence: list[str] = field(default_factory=list)
+    """Structured detection reasons from each detector phase."""
+    confidence_breakdown: dict | None = None
+    """Per-detector confidence contributions (ConfidenceBreakdown)."""
 
     # ---------------------------------------------------------------------------
     # Backward-compatible shims — callers that set locked=True or read
