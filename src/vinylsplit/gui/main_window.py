@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -14,7 +16,7 @@ from PySide6.QtWidgets import (
 )
 
 from vinylsplit.application import ApplicationContext
-from vinylsplit.gui.dialogs import PlaybackSettingsDialog, ReviewDialog
+from vinylsplit.gui.dialogs import PlaybackSettingsDialog
 from vinylsplit.gui.theme import ThemeManager
 from vinylsplit.gui.workspace_manager import WorkspaceManager
 from vinylsplit.gui.workspaces import FocusedWorkspace, StudioWorkspace
@@ -23,6 +25,8 @@ from vinylsplit.gui.widgets.workspace_selector import WorkspaceSelector
 
 class MainWindow(QMainWindow):
     """Top-level desktop shell hosting Focused and Studio workspaces."""
+
+    _SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3"}
 
     def __init__(
         self,
@@ -33,6 +37,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self._app_context = app_context
         self._theme_manager = theme_manager
+        self.setAcceptDrops(True)
 
         self.setWindowTitle("VinylSplit Studio")
         self.resize(1280, 860)
@@ -68,7 +73,6 @@ class MainWindow(QMainWindow):
         self._workspace_selector.workspace_selected.connect(self._workspace_manager.switch_to)
         self._workspace_manager.workspace_changed.connect(self._workspace_selector.set_workspace)
         self._workspace_manager.workspace_changed.connect(self._animate_workspace_transition)
-        self._focused_workspace.review_requested.connect(self._open_review_dialog)
         self._theme_manager.appearance_applied.connect(self._animate_theme_transition)
 
         layout.addLayout(header)
@@ -84,12 +88,6 @@ class MainWindow(QMainWindow):
         self._transition = QPropertyAnimation(self._opacity_effect, b"opacity", self)
         self._transition.setDuration(180)
         self._transition.setEasingCurve(QEasingCurve.Type.InOutQuad)
-
-    def _open_review_dialog(self) -> None:
-        dialog = ReviewDialog(self)
-        result = dialog.exec()
-        if result == ReviewDialog.DialogCode.Accepted:
-            QMessageBox.information(self, "Review", "Review placeholder saved.")
 
     def _open_playback_settings(self) -> None:
         dialog = PlaybackSettingsDialog(current_mode=self._theme_manager.mode, parent=self)
@@ -124,3 +122,26 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _reduced_motion_enabled() -> bool:
         return bool(QApplication.instance().property("vinylsplit_reduced_motion"))
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        for url in event.mimeData().urls():
+            path = Path(url.toLocalFile())
+            if path.suffix.lower() in self._SUPPORTED_AUDIO_EXTENSIONS:
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        for url in event.mimeData().urls():
+            path = Path(url.toLocalFile())
+            if (
+                path.exists()
+                and path.is_file()
+                and path.suffix.lower() in self._SUPPORTED_AUDIO_EXTENSIONS
+            ):
+                self._workspace_manager.switch_to("focused")
+                self._focused_workspace.load_recording(str(path))
+                event.acceptProposedAction()
+                return
+
+        event.ignore()

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 from vinylsplit.application.dto.analyze_request import AnalyzeRequest
 from vinylsplit.application.dto.analyze_result import AnalyzeResult
 from vinylsplit.application.dto.export_result import ExportResult
 from vinylsplit.application.dto.metadata_result import MetadataResult
 from vinylsplit.application.dto.review_result import ReviewResult
+from vinylsplit.application.events import ProgressUpdated
 from vinylsplit.models import AudioInfo
+from vinylsplit.review_state import AdaptiveReviewState
 
 
 class AnalyzeServiceInterface(ABC):
@@ -54,5 +57,7 @@ class ExportServiceInterface(ABC):
         output_directory: str,
         artist: str | None = None,
         album: str | None = None,
+        review_session: AdaptiveReviewState | None = None,
+        progress_callback: Callable[[ProgressUpdated], None] | None = None,
     ) -> ExportResult:
         """Run the end-to-end processing and export workflow."""

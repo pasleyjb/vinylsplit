@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections.abc import Callable
 
 from vinylsplit.audio import read_audio
 from vinylsplit.album_resolver import AlbumResolver
@@ -204,13 +205,26 @@ class Pipeline:
         output_directory: str,
         artist: str | None = None,
         album: str | None = None,
+        review_session: AdaptiveReviewState | None = None,
+        progress_callback: Callable[[str, str, int | None, int | None], None] | None = None,
     ) -> list[tuple[SplitTrack, AlbumMatch]]:
         progress = ProcessingProgress()
         dashboard = Dashboard(progress)
+
+        def emit_progress(
+            stage: str,
+            description: str,
+            completed: int | None = None,
+            total: int | None = None,
+        ) -> None:
+            if progress_callback is not None:
+                progress_callback(stage, description, completed, total)
+
         dashboard.set_album(input_filename=filename)
         dashboard.set_output(output_directory)
         dashboard.set_stage("Preparing", "Preparing")
         dashboard.set_status("Preparing")
+        emit_progress("Preparing", "Preparing", 0, 6)
         dashboard.start()
 
         # Preserve user-supplied fallback hints before local variables shadow them
@@ -245,30 +259,42 @@ class Pipeline:
 
             dashboard.set_stage("Analyzing Audio", "Reading audio")
             dashboard.set_status("Analyzing audio")
-            review_session = self.create_review_session(
-                filename,
-                expected_track_count=expected_track_count,
-                expected_boundary_times=expected_boundary_times,
-            )
+            emit_progress("Analyzing Audio", "Analyzing audio", 0, 1)
+
+            active_review_session = review_session
+            if active_review_session is None:
+                active_review_session = self.create_review_session(
+                    filename,
+                    expected_track_count=expected_track_count,
+                    expected_boundary_times=expected_boundary_times,
+                )
+            self.review_session = active_review_session
 
             if release_from_hints:
-                review_session.album_artist = getattr(release_from_hints, "artist", None)
-                review_session.album_title = getattr(release_from_hints, "album", None)
-                review_session.album_year = getattr(release_from_hints, "year", None)
-                review_session.release_id = getattr(release_from_hints, "release_id", None)
+                active_review_session.album_artist = getattr(release_from_hints, "artist", None)
+                active_review_session.album_title = getattr(release_from_hints, "album", None)
+                active_review_session.album_year = getattr(release_from_hints, "year", None)
+                active_review_session.release_id = getattr(release_from_hints, "release_id", None)
                 tracklist = getattr(release_from_hints, "tracklist", None)
                 if tracklist:
-                    review_session.track_titles = list(tracklist)
+                    active_review_session.track_titles = list(tracklist)
                 durations = getattr(release_from_hints, "track_durations_seconds", None)
                 if durations:
-                    review_session.expected_track_durations_seconds = list(durations)
+                    active_review_session.expected_track_durations_seconds = list(durations)
 
-            boundaries = self._run_boundary_review(
-                filename,
-                review_session,
-                expected_track_count,
-                dashboard,
-            )
+            if review_session is None:
+                boundaries = self._run_boundary_review(
+                    filename,
+                    active_review_session,
+                    expected_track_count,
+                    dashboard,
+                )
+            else:
+                boundaries = list(active_review_session.boundaries)
+                dashboard.set_stage("Interactive Review", "Using approved boundaries")
+                dashboard.set_status("Using approved boundaries", "success")
+                emit_progress("Interactive Review", "Using approved boundaries", 1, 1)
+
             if boundaries is None:
                 return []
 
@@ -280,6 +306,7 @@ class Pipeline:
             )
             progress.update("analyze_audio", completed=1)
             progress.advance("overall", 1)
+            emit_progress("Analyzing Audio", "Analysis complete", 1, 1)
             dashboard.refresh()
 
             written_tracks = 0
@@ -287,6 +314,7 @@ class Pipeline:
             def set_write_total(total: int) -> None:
                 dashboard.set_stage("Write Tracks", "Preparing track exports")
                 dashboard.set_track(completed=0, total=total)
+                emit_progress("Write Tracks", "Preparing track exports", 0, total)
                 progress.update(
                     "write_tracks",
                     completed=0,
@@ -302,6 +330,7 @@ class Pipeline:
                     current_track=track.path.name,
                     completed=written_tracks,
                 )
+                emit_progress("Write Tracks", f"Writing {track.path.name}", written_tracks, len(boundaries))
                 progress.advance("write_tracks", 1)
                 dashboard.refresh()
 
@@ -317,6 +346,7 @@ class Pipeline:
             progress.update("write_tracks", total=len(tracks))
             progress.advance("overall", 1)
             dashboard.set_track(completed=len(tracks), total=len(tracks))
+            emit_progress("Write Tracks", "Track writing complete", len(tracks), len(tracks))
             dashboard.refresh()
 
             results: list[tuple[SplitTrack, AlbumMatch]] = []
@@ -325,6 +355,7 @@ class Pipeline:
 
             dashboard.set_stage("Identifying Tracks", "Identifying exported tracks")
             dashboard.set_status("Identifying tracks")
+            emit_progress("Identifying Tracks", "Identifying tracks", 0, len(tracks))
             dashboard.set_track(completed=0, total=len(tracks))
             for track in tracks:
                 dashboard.set_track(current_track=track.path.name)
@@ -381,6 +412,7 @@ class Pipeline:
                     completed=identified_tracks,
                     total=len(tracks),
                 )
+                emit_progress("Identifying Tracks", f"Identified {track.path.name}", identified_tracks, len(tracks))
 
             progress.advance("overall", 1)
             dashboard.set_status(
@@ -393,18 +425,20 @@ class Pipeline:
 
             dashboard.set_stage("Resolving Album", "Resolving album consensus")
             dashboard.set_status("Resolving album")
+            emit_progress("Resolving Album", "Resolving album consensus", 0, 1)
             album, official_tracks = self.resolver.resolve(results)
             progress.advance("overall", 1)
+            emit_progress("Resolving Album", "Album resolution complete", 1, 1)
 
             if album:
-                review_session.album_artist = album.artist
-                review_session.album_title = album.album
-                review_session.album_year = album.year
-                review_session.release_id = album.release_id
+                active_review_session.album_artist = album.artist
+                active_review_session.album_title = album.album
+                active_review_session.album_year = album.year
+                active_review_session.release_id = album.release_id
 
             if official_tracks:
-                review_session.track_titles = list(official_tracks)
-                for index, boundary in enumerate(review_session.boundaries):
+                active_review_session.track_titles = list(official_tracks)
+                for index, boundary in enumerate(active_review_session.boundaries):
                     if index < len(official_tracks):
                         boundary.track_title = official_tracks[index]
 
@@ -455,19 +489,24 @@ class Pipeline:
                 )
                 dashboard.set_stage("Downloading Artwork", "Downloading album artwork")
                 dashboard.set_status("Downloading album artwork")
+                emit_progress("Downloading Artwork", "Downloading album artwork", 0, 1)
                 try:
                     cover = self.artwork.download_artwork(album.release_id)
                     if cover:
                         cover_path = self.artwork.save_cover_file(album_folder, cover)
                         dashboard.set_status("Album artwork downloaded", "success")
+                        emit_progress("Downloading Artwork", "Artwork downloaded", 1, 1)
                     else:
                         dashboard.set_status("No cover art available", "warning")
+                        emit_progress("Downloading Artwork", "No artwork available", 1, 1)
                 except Exception:
                     cover = None
                     dashboard.set_status("Artwork download failed (continuing)", "warning")
+                    emit_progress("Downloading Artwork", "Artwork download failed", 1, 1)
 
             dashboard.set_stage("Organize Tracks", "Renaming tracks using best metadata")
             dashboard.set_status("Organizing tracks")
+            emit_progress("Organize Tracks", "Organizing track metadata", 0, len(tracks))
 
             # Build quick lookup of per-track matches by track number
             match_by_number: dict[int, AlbumMatch] = {t.track_number: m for t, m in results}
@@ -540,12 +579,14 @@ class Pipeline:
                     dashboard.set_status("Tagged", "success")
                 except Exception as exc:
                     dashboard.set_status(f"Tagging failed: {exc}", "warning")
+                emit_progress("Organize Tracks", f"Tagged {track.path.name}", track.track_number, len(tracks))
 
             progress.advance("overall", 1)
 
             if cover:
                 dashboard.set_stage("Embedding Artwork", "Embedding album artwork")
                 dashboard.set_status("Embedding album artwork")
+                emit_progress("Embedding Artwork", "Embedding album artwork", 0, len(tracks))
 
                 for track, _ in results:
                     dashboard.set_track(current_track=track.path.name)
@@ -553,6 +594,7 @@ class Pipeline:
                         dashboard.set_status("Artwork embedded", "success")
                     else:
                         dashboard.set_status("Embed failed (continuing)", "warning")
+                    emit_progress("Embedding Artwork", f"Embedded {track.path.name}", track.track_number, len(tracks))
 
                 for track in failed:
                     dashboard.set_track(current_track=track.path.name)
@@ -565,11 +607,14 @@ class Pipeline:
                 if cover_path:
                     dashboard.set_stage("Finalizing", "Setting folder icon")
                     dashboard.set_status("Setting folder icon...")
+                    emit_progress("Finalizing", "Setting folder icon", 0, 1)
                     self.artwork.set_folder_icon_linux(album_folder, cover_path)
+                    emit_progress("Finalizing", "Folder icon set", 1, 1)
 
             progress.advance("overall", 1)
             dashboard.set_stage("Complete", "Finished")
             dashboard.set_status("Success", "success")
+            emit_progress("Complete", "Finished", 1, 1)
             dashboard.refresh()
 
             return results

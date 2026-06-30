@@ -201,6 +201,13 @@ def render_stylesheet(t: ThemePalette) -> str:
         margin-bottom: 8px;
     }}
 
+    QLabel#FocusedTagline {{
+        font-size: 13px;
+        color: {t.text_muted};
+        letter-spacing: 0.6px;
+        margin-bottom: 10px;
+    }}
+
     QLabel#SectionTitle {{
         font-size: 14px;
         font-weight: 600;
@@ -212,6 +219,12 @@ def render_stylesheet(t: ThemePalette) -> str:
         border: 2px dashed {t.border};
         border-radius: 14px;
         min-height: 180px;
+    }}
+
+    QFrame#DropZone[compact="true"] {{
+        min-height: 88px;
+        border: 1px dashed {t.border};
+        background-color: {t.surface};
     }}
 
     QFrame#DropZone[dragActive="true"] {{
@@ -228,6 +241,14 @@ def render_stylesheet(t: ThemePalette) -> str:
     QLabel#DropZoneSubtitle {{
         font-size: 13px;
         color: {t.text_muted};
+    }}
+
+    QFrame#DropZone[compact="true"] QLabel#DropZoneTitle {{
+        font-size: 15px;
+    }}
+
+    QFrame#DropZone[compact="true"] QLabel#DropZoneSubtitle {{
+        font-size: 12px;
     }}
 
     QLabel#RecordingInfo {{
@@ -383,6 +404,42 @@ def render_stylesheet(t: ThemePalette) -> str:
         border-radius: 10px;
         padding: 4px;
         color: {t.text_secondary};
+    }}
+
+    QTableWidget {{
+        background-color: {t.surface_elevated};
+        border: 1px solid {t.border};
+        border-radius: 10px;
+        gridline-color: {t.border};
+        selection-background-color: {t.selection};
+        alternate-background-color: {t.surface};
+    }}
+
+    QTableWidget::item {{
+        padding: 6px;
+    }}
+
+    QHeaderView::section {{
+        background-color: {t.surface};
+        color: {t.text_primary};
+        border: 0;
+        border-bottom: 1px solid {t.border};
+        padding: 6px 8px;
+        font-weight: 600;
+    }}
+
+    QFrame#ReviewWaveformPlaceholder {{
+        background-color: {t.panel};
+        border: 1px dashed {t.border};
+        border-radius: 10px;
+        min-height: 210px;
+        color: {t.text_muted};
+    }}
+
+    QLabel#InspectorValue {{
+        color: {t.text_primary};
+        font-size: 14px;
+        font-weight: 600;
     }}
 
     QFrame#StatusBanner[tone="info"] {{

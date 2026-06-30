@@ -90,7 +90,7 @@ def process(
         ui.warning("Processing stopped before export.")
         return
 
-    ui.success(f"Finished. Successfully processed {len(results.results)} tracks.")
+    ui.success(f"Finished. Successfully processed {results.exported_tracks} tracks.")
 
 
 @app.command()
