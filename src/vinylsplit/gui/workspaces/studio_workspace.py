@@ -51,6 +51,7 @@ class StudioWorkspace(QWidget):
         self._is_playing = False
         self._waveform_widget: ReviewWaveformView | None = None
         self._artwork_available = False
+        self._active_review_dialog: ReviewDialog | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 18, 20, 18)
@@ -382,11 +383,21 @@ class StudioWorkspace(QWidget):
 
         session_dto = self._app_context.review_controller.get_session_dto()
         if session_dto is not None:
-            dialog = ReviewDialog(session_dto=session_dto, parent=self)
+            dialog = ReviewDialog(
+                session_dto=session_dto,
+                boundaries=tuple(self._review_session.boundaries),
+                parent=self,
+            )
         else:
             dialog = ReviewDialog(boundaries=tuple(self._review_session.boundaries), parent=self)
 
-        if dialog.exec() == ReviewDialog.DialogCode.Accepted:
+        self._active_review_dialog = dialog
+        try:
+            accepted = dialog.exec() == ReviewDialog.DialogCode.Accepted
+        finally:
+            self._active_review_dialog = None
+
+        if accepted:
             self._state.review_state = "Completed"
             self._state.progress_label = "Review approved"
             self._state.progress_value = 0
@@ -591,8 +602,19 @@ class StudioWorkspace(QWidget):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         """Ensure worker threads stop cleanly when Studio widget is closed."""
 
+        self._shutdown_active_review_dialog()
+        self._shutdown_playback_preview()
         self._shutdown_background_threads()
         super().closeEvent(event)
+
+    def _shutdown_active_review_dialog(self) -> None:
+        if self._active_review_dialog is not None:
+            self._active_review_dialog.close()
+        self._active_review_dialog = None
+
+    def _shutdown_playback_preview(self) -> None:
+        self._is_playing = False
+        self._state.status_message = "Playback stopped."
 
     def _shutdown_background_threads(self) -> None:
         if self._analyze_thread is not None and self._analyze_thread.isRunning():

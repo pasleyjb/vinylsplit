@@ -1,6 +1,7 @@
 from pathlib import Path
 from collections.abc import Callable
 
+from mutagen import File as MutagenFile
 from vinylsplit.audio import read_audio
 from vinylsplit.album_resolver import AlbumResolver
 from vinylsplit.boundary_validation import BoundaryValidator
@@ -67,8 +68,40 @@ class Pipeline:
         self.verifier.register_provider(MusicBrainzProvider())
         self.verifier.register_provider(FilePropertiesProvider())
 
+    def _read_embedded_metadata(self, filename: str) -> tuple[str | None, str | None, str | None]:
+        """Read artist, album, and year from embedded tags when available."""
+
+        try:
+            audio = MutagenFile(filename)
+        except Exception:
+            return None, None, None
+
+        if audio is None or not getattr(audio, "tags", None):
+            return None, None, None
+
+        tags = audio.tags
+
+        def first_value(keys: tuple[str, ...]) -> str | None:
+            for key in keys:
+                values = tags.get(key)
+                if values:
+                    value = values[0]
+                    if value:
+                        return str(value)
+            return None
+
+        artist = first_value(("artist", "ARTIST", "albumartist", "ALBUMARTIST"))
+        album = first_value(("album", "ALBUM"))
+        year = first_value(("date", "DATE", "year", "YEAR"))
+
+        if year:
+            year = year[:4]
+
+        return artist, album, year
+
     def _lookup_release_guidance(
         self,
+        filename: str,
         artist: str | None,
         album: str | None,
         dashboard: Dashboard,
@@ -78,6 +111,11 @@ class Pipeline:
         expected_track_count: int | None = None
         expected_boundary_times: list[float] | None = None
         release_from_hints: MusicBrainzService.ReleaseMatch | None = None
+
+        if not artist and not album:
+            embedded_artist, embedded_album, _ = self._read_embedded_metadata(filename)
+            artist = embedded_artist
+            album = embedded_album
 
         if artist or album:
             try:
@@ -143,9 +181,32 @@ class Pipeline:
         return read_audio(str(path))
 
     def identify(self, filename: str) -> AlbumMatch:
+        embedded_artist, embedded_album, embedded_year = self._read_embedded_metadata(filename)
+
+        if embedded_artist or embedded_album:
+            try:
+                mb = MusicBrainzService()
+                release = mb.search_release(embedded_artist, embedded_album)
+                if release is not None:
+                    return AlbumMatch(
+                        artist=release.artist,
+                        title="",
+                        album=release.album,
+                        year=release.year,
+                        release_id=release.release_id,
+                        confidence=1.0,
+                    )
+            except Exception:
+                pass
+
         fingerprint = self.fingerprinter.fingerprint(filename)
         lookup = AlbumLookup()
-        return lookup.identify(fingerprint)
+        match = lookup.identify(fingerprint)
+
+        if match is not None and embedded_year and not match.year:
+            match.year = embedded_year
+
+        return match
 
     def analyze(
         self,
@@ -252,6 +313,7 @@ class Pipeline:
             progress.update("write_tracks", completed=0)
 
             expected_track_count, expected_boundary_times, release_from_hints = self._lookup_release_guidance(
+                filename,
                 user_artist,
                 user_album,
                 dashboard,

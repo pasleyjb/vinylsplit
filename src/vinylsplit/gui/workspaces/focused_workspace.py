@@ -1,481 +1,448 @@
-"""Focused workspace — automatic archival assistant.
-
-The user selects a recording and an output folder.
-VinylSplit does the rest.
-"""
-
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from typing import Any
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt, QUrl
-from PySide6.QtGui import (
-    QCloseEvent,
-    QDesktopServices,
-    QDragEnterEvent,
-    QDragLeaveEvent,
-    QDropEvent,
-    QFont,
-    QFontDatabase,
-)
+from PySide6.QtCore import QObject, QSettings, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
+    QCheckBox,
+    QComboBox,
     QLabel,
-    QProgressBar,
+    QMessageBox,
     QPushButton,
-    QSizePolicy,
-    QStackedWidget,
+    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
 
-from vinylsplit.application import ApplicationContext
-from vinylsplit.application.events import ProgressUpdated
-from vinylsplit.gui.dialogs import ReviewDialog
+from mutagen import File as MutagenFile
+
+try:
+    from vinylsplit.application.context import ApplicationContext
+except Exception:  # pragma: no cover - fallback for local import variations
+    ApplicationContext = Any  # type: ignore[assignment]
+
+from vinylsplit.application.services.review_mapper import map_session_to_dto
+
+try:
+    from vinylsplit.gui.dialogs.review_dialog import ReviewDialog
+except Exception:  # pragma: no cover - fallback if dialog export path changes
+    ReviewDialog = None  # type: ignore[assignment]
+
 from vinylsplit.gui.state import WorkspaceViewState
-from vinylsplit.gui.widgets.drop_zone import DropZone
 
 
-# ---------------------------------------------------------------------------
-# Settings
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class FocusedSettings:
-    """User-configurable automation preferences for Focused mode."""
-
-    auto_analyze: bool = True
-    auto_deep_identify: bool = True
-    auto_split_on_high_confidence: bool = True
-    review_threshold: str = "Good"  # "Excellent" | "Good" | "Fair"
-
-    def confidence_threshold(self) -> float:
-        return {"Excellent": 0.85, "Good": 0.70, "Fair": 0.55}.get(
-            self.review_threshold, 0.70
-        )
-
-
-# ---------------------------------------------------------------------------
-# Internal step enum
-# ---------------------------------------------------------------------------
-
-
-class _Step(Enum):
+class FocusedStep(Enum):
     WELCOME = "welcome"
-    READY = "ready"
+    RECORDING_LOADED = "recording_loaded"
     ANALYZING = "analyzing"
-    IDENTIFYING = "identifying"
-    SPLITTING = "splitting"
-    REVIEWING = "reviewing"
-    COMPLETE = "complete"
-    FAILED = "failed"
-
-
-# ---------------------------------------------------------------------------
-# Workspace
-# ---------------------------------------------------------------------------
+    REVIEW_RECOMMENDED = "review_recommended"
+    READY_TO_SPLIT = "ready_to_split"
+    ARCHIVE_COMPLETE = "archive_complete"
 
 
 class FocusedWorkspace(QWidget):
-    """Automatic archival workflow. Select a recording. VinylSplit does the rest."""
-
     state_changed = Signal(object)
+    _LAST_UPLOAD_DIR_KEY = "focused/lastUploadDirectory"
 
-    def __init__(
-        self, app_context: ApplicationContext, parent: QWidget | None = None
-    ) -> None:
+    def __init__(self, app_context: ApplicationContext, state: WorkspaceViewState | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("FocusedWorkspaceRoot")
         self.setAcceptDrops(True)
-
         self._app_context = app_context
-        self._settings = FocusedSettings()
-
-        # Internal state
-        self._step = _Step.WELCOME
-        self._recording_path: str | None = None
-        self._output_folder: str = str(Path.home() / "Music")
-        self._review_session: object | None = None
-        self._last_exported_folder: str | None = None
-        self._archive_info: dict = {}
-
-        # Background threads / workers
+        self._state = state or WorkspaceViewState()
+        self._ui_step = FocusedStep.WELCOME
+        self._review_session: Any | None = None
+        self._analysis_result: dict[str, Any] | None = None
+        self._last_output_directory: str | None = None
+        self._artwork_available = False
         self._analyze_thread: QThread | None = None
         self._analyze_worker: _FocusedAnalyzeWorker | None = None
-        self._identify_thread: QThread | None = None
-        self._identify_worker: _FocusedIdentifyWorker | None = None
         self._export_thread: QThread | None = None
         self._export_worker: _FocusedExportWorker | None = None
+        self._workspace_manager: Any | None = None
+        self._active_review_dialog: QWidget | None = None
+        self._settings = QSettings()
 
-        # Shared state for WorkspaceManager sync
-        self._state = WorkspaceViewState()
+        self._auto_analyze_check = QCheckBox("Automatically analyze")
+        self._auto_review_check = QCheckBox("Open review only when needed")
+        self._auto_split_check = QCheckBox("Automatically split when confident")
+        self._auto_artwork_check = QCheckBox("Automatically fetch artwork")
+        self._review_threshold_combo = QComboBox()
+        self._review_threshold_combo.addItem("Excellent", 0.92)
+        self._review_threshold_combo.addItem("Good", 0.85)
+        self._review_threshold_combo.addItem("Fair", 0.75)
+        self._auto_analyze_check.toggled.connect(lambda checked: self._set_state_field("focused_auto_analyze", checked))
+        self._auto_review_check.toggled.connect(lambda checked: self._set_state_field("focused_auto_review", checked))
+        self._auto_split_check.toggled.connect(lambda checked: self._set_state_field("focused_auto_split", checked))
+        self._auto_artwork_check.toggled.connect(lambda checked: self._set_state_field("focused_auto_artwork", checked))
+        self._review_threshold_combo.currentIndexChanged.connect(self._on_review_threshold_changed)
 
-        # Build UI: two pages stacked
-        self._pages = QStackedWidget()
-        self._pages.addWidget(self._build_workflow_page())
-        self._pages.addWidget(self._build_complete_page())
+        self._build_ui()
+        self._sync_state_from_model()
+        self._sync_action_buttons()
 
+    def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._pages)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(14)
 
-        self._update_ui()
+        title = QLabel("Focused")
+        title.setObjectName("focusedTitle")
+        subtitle = QLabel("Drop one recording here and VinylSplit will archive it for you.")
+        subtitle.setWordWrap(True)
 
-    # ------------------------------------------------------------------
-    # Public API (WorkspaceManager interface)
-    # ------------------------------------------------------------------
-
-    def apply_state(self, state: WorkspaceViewState) -> None:
-        """Receive cross-workspace state from WorkspaceManager."""
-        self._state.active_workspace = state.active_workspace
-        self._state.recent_projects = state.recent_projects
-
-    def current_state(self) -> WorkspaceViewState:
-        return self._state
-
-    def load_recording(self, filename: str) -> None:
-        """Drop / MainWindow-initiated entry point."""
-        self._on_file_selected(filename)
-
-    def update_settings(self, settings: FocusedSettings) -> None:
-        """Called by Settings dialog when preferences change."""
-        self._settings = settings
-
-    # ------------------------------------------------------------------
-    # Layout builders
-    # ------------------------------------------------------------------
-
-    def _build_workflow_page(self) -> QWidget:
-        page = QWidget()
-        root = QVBoxLayout(page)
-        root.setContentsMargins(80, 48, 80, 48)
-        root.setSpacing(0)
-
-        # Branding
-        title = QLabel("VinylSplit")
-        title.setObjectName("FocusedTitle")
-        title.setFont(_title_font())
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        tagline = QLabel("Intelligent Archive Tool")
-        tagline.setObjectName("FocusedTagline")
-        tagline.setFont(_tagline_font())
-        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        root.addStretch(1)
         root.addWidget(title)
-        root.addSpacing(6)
-        root.addWidget(tagline)
-        root.addSpacing(36)
+        root.addWidget(subtitle)
 
-        # Recording selection
-        self._drop_zone = DropZone()
-        self._drop_zone.file_dropped.connect(self._on_file_selected)
-        self._drop_zone.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-        )
-        root.addWidget(self._drop_zone)
-        root.addSpacing(12)
+        action_row = QHBoxLayout()
+        self._select_button = QPushButton("Select Recording")
+        self._archive_button = QPushButton("Archive Now")
+        self._review_button = QPushButton("Open Review")
+        self._split_button = QPushButton("Split")
+        self._open_output_button = QPushButton("Open Output Folder")
+        self._archive_again_button = QPushButton("Archive Another Album")
 
-        browse_row = QHBoxLayout()
-        self._browse_button = QPushButton("Browse Recording")
-        self._browse_button.setObjectName("SecondaryButton")
-        self._browse_button.setMinimumHeight(42)
-        self._browse_button.clicked.connect(self._browse_recording)
+        self._select_button.clicked.connect(self._choose_recording)
+        self._archive_button.clicked.connect(self._begin_automatic_archive)
+        self._review_button.clicked.connect(self._open_review_dialog)
+        self._split_button.clicked.connect(self._start_export)
+        self._open_output_button.clicked.connect(self._open_output_folder)
+        self._archive_again_button.clicked.connect(self._reset_for_next_album)
 
-        self._recording_label = QLabel("No recording selected")
-        self._recording_label.setObjectName("RecordingInfo")
-        self._recording_label.setWordWrap(True)
-        self._recording_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
+        for button in (
+            self._select_button,
+            self._archive_button,
+            self._review_button,
+            self._split_button,
+            self._open_output_button,
+            self._archive_again_button,
+        ):
+            action_row.addWidget(button)
 
-        browse_row.addWidget(self._browse_button)
-        browse_row.addSpacing(12)
-        browse_row.addWidget(self._recording_label, 1)
-        root.addLayout(browse_row)
-        root.addSpacing(14)
+        root.addLayout(action_row)
 
-        # Output folder
-        output_row = QHBoxLayout()
-        self._output_button = QPushButton("Output Folder")
-        self._output_button.setObjectName("SecondaryButton")
-        self._output_button.setMinimumHeight(42)
-        self._output_button.clicked.connect(self._choose_output_folder)
-
-        self._output_label = QLabel(self._output_folder)
-        self._output_label.setObjectName("RecordingInfo")
-        self._output_label.setWordWrap(True)
-        self._output_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-
-        output_row.addWidget(self._output_button)
-        output_row.addSpacing(12)
-        output_row.addWidget(self._output_label, 1)
-        root.addLayout(output_row)
-        root.addSpacing(36)
-
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        root.addWidget(sep)
-        root.addSpacing(28)
-
-        # Stage heading
-        self._stage_label = QLabel("")
-        self._stage_label.setObjectName("SectionTitle")
-        self._stage_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self._stage_label)
-        root.addSpacing(14)
-
-        # Large progress bar
+        self._progress_card = QFrame()
+        self._progress_card.setObjectName("focusedProgressCard")
+        progress_layout = QVBoxLayout(self._progress_card)
+        progress_layout.setContentsMargins(16, 16, 16, 16)
+        self._status_label = QLabel("Waiting for a recording.")
+        self._status_label.setWordWrap(True)
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
-        self._progress_bar.setMinimumHeight(26)
-        self._progress_bar.setTextVisible(True)
-        root.addWidget(self._progress_bar)
-        root.addSpacing(12)
+        progress_layout.addWidget(self._status_label)
+        progress_layout.addWidget(self._progress_bar)
+        root.addWidget(self._progress_card)
 
-        # Status detail
-        self._status_label = QLabel("")
-        self._status_label.setObjectName("StatusBarText")
-        self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status_label.setWordWrap(True)
-        root.addWidget(self._status_label)
-        root.addSpacing(24)
+        options_card = QFrame()
+        options_card.setObjectName("focusedOptionsCard")
+        options_layout = QGridLayout(options_card)
+        options_layout.setContentsMargins(16, 16, 16, 16)
+        options_layout.addWidget(self._auto_analyze_check, 0, 0)
+        options_layout.addWidget(self._auto_review_check, 1, 0)
+        options_layout.addWidget(self._auto_split_check, 0, 1)
+        options_layout.addWidget(self._auto_artwork_check, 1, 1)
+        options_layout.addWidget(QLabel("Review threshold"), 2, 0)
+        options_layout.addWidget(self._review_threshold_combo, 2, 1)
+        root.addWidget(options_card)
 
-        # Action buttons
-        action_row = QHBoxLayout()
-        action_row.addStretch(1)
+        artwork_card = QFrame()
+        artwork_card.setObjectName("focusedArtworkCard")
+        artwork_layout = QVBoxLayout(artwork_card)
+        artwork_layout.setContentsMargins(12, 12, 12, 12)
+        artwork_layout.setSpacing(8)
+        artwork_title = QLabel("Artwork")
+        artwork_title.setObjectName("StatusBarText")
+        self._artwork_label = QLabel("No artwork")
+        self._artwork_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._artwork_label.setMinimumHeight(140)
+        self._artwork_label.setObjectName("ArtworkPlaceholder")
+        artwork_layout.addWidget(artwork_title)
+        artwork_layout.addWidget(self._artwork_label)
+        root.addWidget(artwork_card)
 
-        self._begin_button = QPushButton("Begin Archiving")
-        self._begin_button.setObjectName("PrimaryButton")
-        self._begin_button.setMinimumHeight(52)
-        self._begin_button.setMinimumWidth(200)
-        self._begin_button.clicked.connect(self._start_pipeline)
-
-        self._cancel_button = QPushButton("Cancel")
-        self._cancel_button.setObjectName("SecondaryButton")
-        self._cancel_button.setMinimumHeight(52)
-        self._cancel_button.setMinimumWidth(140)
-        self._cancel_button.clicked.connect(self._cancel_pipeline)
-
-        action_row.addWidget(self._begin_button)
-        action_row.addSpacing(12)
-        action_row.addWidget(self._cancel_button)
-        action_row.addStretch(1)
-        root.addLayout(action_row)
-
-        root.addStretch(2)
-        return page
-
-    def _build_complete_page(self) -> QWidget:
-        page = QWidget()
-        root = QVBoxLayout(page)
-        root.setContentsMargins(80, 60, 80, 60)
-        root.setSpacing(0)
-
+        self._summary_label = QLabel("No album loaded.")
+        self._summary_label.setWordWrap(True)
+        root.addWidget(self._summary_label)
         root.addStretch(1)
 
-        check = QLabel("\u2713 Archive Complete")
-        check.setObjectName("FocusedTitle")
-        check.setFont(_title_font())
-        check.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(check)
-        root.addSpacing(28)
+        self._progress_card.hide()
 
-        self._complete_album_label = QLabel("")
-        self._complete_album_label.setObjectName("SectionTitle")
-        self._complete_album_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        root.addWidget(self._complete_album_label)
-        root.addSpacing(8)
+    def apply_state(self, state: WorkspaceViewState) -> None:
+        self._state = state
+        self._sync_state_from_model()
 
-        self._complete_detail_label = QLabel("")
-        self._complete_detail_label.setObjectName("StatusBarText")
-        self._complete_detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._complete_detail_label.setWordWrap(True)
-        root.addWidget(self._complete_detail_label)
-        root.addSpacing(8)
+    def set_workspace_manager(self, manager: Any) -> None:
+        self._workspace_manager = manager
 
-        self._complete_path_label = QLabel("")
-        self._complete_path_label.setObjectName("RecordingInfo")
-        self._complete_path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._complete_path_label.setWordWrap(True)
-        root.addWidget(self._complete_path_label)
-        root.addSpacing(36)
+    def _sync_state_from_model(self) -> None:
+        recording_path = getattr(self._state, "recording_path", None)
+        album_artist = getattr(self._state, "album_artist", None) or ""
+        album_title = getattr(self._state, "album_title", None) or ""
+        status_message = getattr(self._state, "status_message", None) or "Waiting for a recording."
+        progress_label = getattr(self._state, "progress_label", None) or "Idle"
+        progress_value = getattr(self._state, "progress_value", 0) or 0
+        analysis_state = getattr(self._state, "analysis_state", "") or ""
+        track_list = tuple(getattr(self._state, "track_list", ()) or ())
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        root.addWidget(sep)
-        root.addSpacing(28)
+        self._auto_analyze_check.setChecked(bool(getattr(self._state, "focused_auto_analyze", True)))
+        self._auto_review_check.setChecked(bool(getattr(self._state, "focused_auto_review", True)))
+        self._auto_split_check.setChecked(bool(getattr(self._state, "focused_auto_split", False)))
+        self._auto_artwork_check.setChecked(bool(getattr(self._state, "focused_auto_artwork", True)))
+        threshold_name = getattr(self._state, "focused_review_threshold", "Good")
+        threshold_index = self._review_threshold_combo.findText(str(threshold_name))
+        if threshold_index >= 0 and threshold_index != self._review_threshold_combo.currentIndex():
+            self._review_threshold_combo.setCurrentIndex(threshold_index)
 
-        button_row = QHBoxLayout()
-        button_row.addStretch(1)
+        summary_parts: list[str] = []
+        if recording_path:
+            summary_parts.append(f"Loaded: {Path(recording_path).name}")
+        else:
+            summary_parts.append("No album loaded.")
 
-        open_button = QPushButton("Open Folder")
-        open_button.setObjectName("PrimaryButton")
-        open_button.setMinimumHeight(52)
-        open_button.setMinimumWidth(160)
-        open_button.clicked.connect(self._open_output_folder)
+        if album_artist or album_title:
+            summary_parts = [f"{album_artist} - {album_title}".strip(" -")]
 
-        another_button = QPushButton("Archive Another Album")
-        another_button.setObjectName("SecondaryButton")
-        another_button.setMinimumHeight(52)
-        another_button.setMinimumWidth(200)
-        another_button.clicked.connect(self._reset_to_welcome)
+        if track_list:
+            track_count = len(track_list)
+            summary_parts.append(f"{track_count} detected tracks")
 
-        button_row.addWidget(open_button)
-        button_row.addSpacing(16)
-        button_row.addWidget(another_button)
-        button_row.addStretch(1)
-        root.addLayout(button_row)
+        if analysis_state == "Complete":
+            summary_parts = ["Archive Complete"]
+            if album_artist or album_title:
+                summary_parts.append(f"{album_artist} - {album_title}".strip(" -"))
+            if self._last_output_directory:
+                summary_parts.append(f"Saved to {self._last_output_directory}")
 
-        root.addStretch(2)
-        return page
+        self._summary_label.setText(" | ".join(part for part in summary_parts if part))
 
-    # ------------------------------------------------------------------
-    # Recording / output folder selection
-    # ------------------------------------------------------------------
+        self._status_label.setText(f"{status_message} [{progress_label}]")
+        self._progress_bar.setValue(int(progress_value))
+        self._set_progress_visible(bool(recording_path) and analysis_state not in {"", "Idle"})
+        self._sync_action_buttons()
 
-    def _browse_recording(self) -> None:
+    def _choose_recording(self) -> None:
+        initial_directory = str(
+            self._settings.value(
+                self._LAST_UPLOAD_DIR_KEY,
+                str(Path.home()),
+            )
+        )
+
         filename, _ = QFileDialog.getOpenFileName(
             self,
-            "Select Recording",
-            "",
-            "Audio Files (*.wav *.flac *.aiff *.aif *.ogg *.mp3);;All Files (*)",
+            "Select a recording",
+            initial_directory,
+            "Audio Files (*.flac *.wav *.aiff *.aif *.mp3 *.m4a);;All Files (*)",
         )
         if filename:
             self._on_file_selected(filename)
 
-    def _choose_output_folder(self) -> None:
-        if self._step in (_Step.ANALYZING, _Step.IDENTIFYING, _Step.SPLITTING):
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
+        mime_data = event.mimeData()
+        if mime_data.hasUrls() and any(url.isLocalFile() for url in mime_data.urls()):
+            event.acceptProposedAction()
             return
-        folder = QFileDialog.getExistingDirectory(
-            self, "Select Output Folder", self._output_folder
-        )
-        if folder:
-            self._output_folder = folder
-            self._output_label.setText(folder)
-            self._maybe_auto_start()
+        event.ignore()
 
-    def _on_file_selected(self, filename: str) -> None:
-        path = Path(filename)
-        self._recording_path = str(path)
-        self._review_session = None
-        self._last_exported_folder = None
-        self._archive_info = {}
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self._on_file_selected(url.toLocalFile())
+                event.acceptProposedAction()
+                return
+        event.ignore()
 
-        self._recording_label.setText(path.name)
-        self._step = _Step.READY
-        self._pages.setCurrentIndex(0)
+    def _on_file_selected(self, file_path: str) -> None:
+        try:
+            self._settings.setValue(self._LAST_UPLOAD_DIR_KEY, str(Path(file_path).parent))
+        except Exception:
+            pass
 
-        self._state.recording_path = str(path)
-        self._state.recording_info = f"Recording loaded: {path.name}"
-        self._state.analysis_state = "Not started"
-        self._state.review_state = "Not requested"
-        self._state.track_list = ()
-        self._state.album_artist = "Unknown Artist"
-        self._state.album_title = "Unknown Album"
-
-        self._set_progress(0, "Recording loaded.")
-        self._update_ui()
-        self._maybe_auto_start()
+        self._clear_artwork_preview()
+        self._set_state_field("recording_path", file_path)
+        self._set_state_field("recording_info", Path(file_path).name)
+        self._apply_embedded_metadata_hint(file_path)
+        self._set_state_field("analysis_state", "Idle")
+        self._set_state_field("review_state", "Pending")
+        self._set_state_field("status_message", "Recording loaded. Archiving will begin automatically.")
+        self._ui_step = FocusedStep.RECORDING_LOADED
         self._emit_state_change()
 
-    def _maybe_auto_start(self) -> None:
-        if (
-            self._recording_path
-            and self._output_folder
-            and self._settings.auto_analyze
-            and self._step == _Step.READY
-        ):
-            self._start_pipeline()
+        if self._auto_analyze_check.isChecked():
+            self._begin_automatic_archive()
 
-    # ------------------------------------------------------------------
-    # Pipeline orchestration
-    # ------------------------------------------------------------------
-
-    def _start_pipeline(self) -> None:
-        if not self._recording_path:
-            self._set_progress(0, "Select a recording to begin.")
+    def _begin_automatic_archive(self) -> None:
+        if not getattr(self._state, "recording_path", None):
             return
-        if not self._output_folder:
-            self._set_progress(0, "Select an output folder to continue.")
+
+        if self._analyze_thread is not None:
             return
-        self._step = _Step.ANALYZING
-        self._update_ui()
-        self._set_progress(5, "Analyzing audio...")
-        self._launch_analyze_worker()
 
-    # ── Analyze phase ──────────────────────────────────────────────────
+        self._ui_step = FocusedStep.ANALYZING
+        self._set_state_field("analysis_state", "Analyzing")
+        self._set_state_field("status_message", "Analyzing your recording...")
+        self._set_state_field("progress_label", "Analyzing")
+        self._set_state_field("progress_value", 10)
+        self._set_progress_visible(True)
+        self._emit_state_change()
 
-    def _launch_analyze_worker(self) -> None:
         self._analyze_thread = QThread(self)
-        self._analyze_worker = _FocusedAnalyzeWorker(
-            app_context=self._app_context,
-            recording_path=self._recording_path,
-        )
+        self._analyze_worker = _FocusedAnalyzeWorker(self._app_context, getattr(self._state, "recording_path"))
         self._analyze_worker.moveToThread(self._analyze_thread)
         self._analyze_thread.started.connect(self._analyze_worker.run)
-        self._analyze_worker.progress.connect(self._on_analyze_progress)
-        self._analyze_worker.completed.connect(self._on_analyze_complete)
-        self._analyze_worker.failed.connect(self._on_stage_failed)
+        self._analyze_worker.progress.connect(self._on_analysis_progress)
+        self._analyze_worker.completed.connect(self._on_analysis_complete)
+        self._analyze_worker.failed.connect(self._on_analysis_failed)
         self._analyze_worker.completed.connect(self._analyze_thread.quit)
         self._analyze_worker.failed.connect(self._analyze_thread.quit)
         self._analyze_thread.finished.connect(self._cleanup_analyze_worker)
         self._analyze_thread.start()
 
-    @Slot(int, str)
-    def _on_analyze_progress(self, value: int, message: str) -> None:
-        self._set_progress(5 + int(value * 0.29), message)
+    def _run_analysis(self) -> None:
+        self._begin_automatic_archive()
 
-    @Slot(object)
-    def _on_analyze_complete(self, payload: object) -> None:
-        data = payload if isinstance(payload, dict) else {}
-        review_session = data.get("review_session")
-        metadata_match = data.get("metadata_match")
+    def _advance_flow(self) -> None:
+        if self._ui_step is FocusedStep.WELCOME:
+            self._begin_automatic_archive()
+        elif self._ui_step is FocusedStep.REVIEW_RECOMMENDED:
+            self._open_review_dialog()
+        elif self._ui_step is FocusedStep.READY_TO_SPLIT:
+            self._start_export()
+        elif self._ui_step is FocusedStep.ARCHIVE_COMPLETE:
+            self._open_output_folder()
 
-        if review_session is None:
-            self._on_stage_failed("Analysis returned no session.")
+    def _apply_step_ui(self) -> None:
+        self._sync_action_buttons()
+
+    def _sync_step_from_state(self) -> None:
+        analysis_state = getattr(self._state, "analysis_state", "") or ""
+        review_state = getattr(self._state, "review_state", "") or ""
+        if analysis_state == "Complete":
+            self._ui_step = FocusedStep.ARCHIVE_COMPLETE
+        elif analysis_state == "Analyzed" and review_state == "Completed":
+            self._ui_step = FocusedStep.READY_TO_SPLIT
+        elif analysis_state == "Analyzed":
+            self._ui_step = FocusedStep.REVIEW_RECOMMENDED
+        elif analysis_state == "Analyzing":
+            self._ui_step = FocusedStep.ANALYZING
+        elif getattr(self._state, "recording_path", None):
+            self._ui_step = FocusedStep.RECORDING_LOADED
+        else:
+            self._ui_step = FocusedStep.WELCOME
+
+    def _apply_embedded_metadata_hint(self, file_path: str) -> None:
+        """Populate the header from embedded tags before acoustic identification runs."""
+
+        try:
+            audio = MutagenFile(file_path)
+        except Exception:
+            audio = None
+
+        tags = getattr(audio, "tags", None)
+        if not tags:
             return
 
-        self._review_session = review_session
-        boundaries = tuple(getattr(self._review_session, "boundaries", ()))
+        def first_value(keys: tuple[str, ...]) -> str | None:
+            for key in keys:
+                values = tags.get(key)
+                if values:
+                    value = values[0]
+                    if value:
+                        return str(value)
+            return None
 
-        self._state.analysis_state = "Analyzed"
-        self._state.review_state = "Requested"
-        self._state.track_list = tuple(
-            getattr(b, "track_title", None)
-            or f"Track {getattr(b, 'track_number', i + 1):02d}"
-            for i, b in enumerate(boundaries)
-        )
-        if metadata_match:
-            artist = getattr(metadata_match, "artist", "")
-            album = getattr(metadata_match, "album", "")
-            release_id = getattr(metadata_match, "release_id", "")
-            self._state.album_artist = artist
-            self._state.album_title = album
-            self._archive_info.update(artist=artist, album=album, release_id=release_id)
+        artist = first_value(("artist", "ARTIST", "albumartist", "ALBUMARTIST"))
+        album = first_value(("album", "ALBUM"))
 
+        if artist:
+            self._set_state_field("album_artist", artist)
+        if album:
+            self._set_state_field("album_title", album)
+
+    @Slot(int, int, str)
+    def _on_analysis_progress(self, completed: int, total: int, message: str) -> None:
+        total = max(1, total)
+        self._set_state_field("progress_value", max(0, min(100, int((completed / total) * 100))))
+        self._set_state_field("progress_label", message)
+        self._set_state_field("status_message", message)
         self._emit_state_change()
-        self._set_progress(34, f"Found {len(boundaries)} track boundaries.")
 
-        if self._settings.auto_deep_identify:
-            self._step = _Step.IDENTIFYING
-            self._update_ui()
-            self._set_progress(35, "Identifying album...")
-            self._launch_identify_worker()
+    @Slot(object)
+    def _on_analysis_complete(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        review_result = data.get("review_result")
+        metadata_match = data.get("metadata_match")
+        release_tracklist = data.get("release_tracklist") or []
+        release_artwork = data.get("release_artwork")
+        confidence = float(data.get("confidence") or 0.0)
+
+        self._analysis_result = data
+        self._review_session = getattr(review_result, "session", None)
+
+        if metadata_match is not None:
+            self._set_state_field("album_artist", getattr(metadata_match, "artist", ""))
+            self._set_state_field("album_title", getattr(metadata_match, "album", ""))
         else:
-            self._evaluate_confidence_and_proceed()
+            self._set_state_field("album_artist", "Album information couldn't be identified")
+            self._set_state_field("album_title", Path(getattr(self._state, "recording_path", "") or "").stem)
+
+        boundaries = tuple(getattr(self._review_session, "boundaries", ()) or ())
+        if release_tracklist and self._review_session is not None:
+            self._review_session.track_titles = list(release_tracklist)
+            for index, boundary in enumerate(boundaries):
+                if index < len(release_tracklist):
+                    boundary.track_title = release_tracklist[index]
+
+        track_labels = tuple(
+            getattr(boundary, "track_title", None) or f"Track {getattr(boundary, 'track_number', index + 1):02d}"
+            for index, boundary in enumerate(boundaries)
+        )
+        self._set_state_field("track_list", track_labels)
+        self._set_state_field("analysis_state", "Analyzed")
+        self._set_state_field("review_state", "Requested")
+        self._set_state_field("progress_label", "Analysis complete")
+        self._set_state_field("progress_value", 100)
+        self._set_state_field("recording_info", f"Detected {len(track_labels)} tracks.")
+
+        if release_artwork:
+            self._update_artwork_preview(release_artwork)
+        else:
+            self._clear_artwork_preview()
+
+        self._ui_step = FocusedStep.REVIEW_RECOMMENDED
+        self._set_progress_visible(False)
+        self._emit_state_change()
+
+        should_review = (not self._auto_review_check.isChecked()) or confidence < self._review_threshold_value()
+        should_split = self._auto_split_check.isChecked() and not should_review
+
+        if should_review:
+            self._open_review_dialog()
+            return
+
+        if should_split:
+            self._start_export()
+            return
+
+        self._ui_step = FocusedStep.READY_TO_SPLIT
+        self._sync_action_buttons()
+
+    @Slot(str)
+    def _on_analysis_failed(self, message: str) -> None:
+        self._set_state_field("analysis_state", "Failed")
+        self._set_state_field("status_message", f"We couldn't analyze this recording: {message}")
+        self._set_state_field("progress_label", "Analysis failed")
+        self._set_state_field("progress_value", 0)
+        self._ui_step = FocusedStep.RECORDING_LOADED
+        self._set_progress_visible(False)
+        self._emit_state_change()
 
     @Slot()
     def _cleanup_analyze_worker(self) -> None:
@@ -483,211 +450,127 @@ class FocusedWorkspace(QWidget):
             self._analyze_worker.deleteLater()
         self._analyze_worker = None
         self._analyze_thread = None
+        self._sync_action_buttons()
 
-    # ── Identify phase ─────────────────────────────────────────────────
-
-    def _launch_identify_worker(self) -> None:
-        if self._review_session is None or not self._recording_path:
-            self._evaluate_confidence_and_proceed()
-            return
-        self._identify_thread = QThread(self)
-        self._identify_worker = _FocusedIdentifyWorker(
-            app_context=self._app_context,
-            recording_path=self._recording_path,
-            review_session=self._review_session,
-        )
-        self._identify_worker.moveToThread(self._identify_thread)
-        self._identify_thread.started.connect(self._identify_worker.run)
-        self._identify_worker.progress.connect(self._on_identify_progress)
-        self._identify_worker.completed.connect(self._on_identify_complete)
-        self._identify_worker.failed.connect(self._on_identify_failed)
-        self._identify_worker.completed.connect(self._identify_thread.quit)
-        self._identify_worker.failed.connect(self._identify_thread.quit)
-        self._identify_thread.finished.connect(self._cleanup_identify_worker)
-        self._identify_thread.start()
-
-    @Slot(int, str)
-    def _on_identify_progress(self, value: int, message: str) -> None:
-        self._set_progress(35 + int(value * 0.30), message)
-
-    @Slot(object)
-    def _on_identify_complete(self, payload: object) -> None:
-        data = payload if isinstance(payload, dict) else {}
-        album = data.get("album")
-        tracklist = data.get("tracklist") or []
-
-        if album is not None and self._review_session is not None:
-            artist = getattr(album, "artist", "")
-            album_title = getattr(album, "album", "")
-            year = getattr(album, "year", "")
-            release_id = getattr(album, "release_id", "")
-            self._review_session.album_artist = artist
-            self._review_session.album_title = album_title
-            self._review_session.album_year = year
-            self._review_session.release_id = release_id
-            self._archive_info.update(
-                artist=artist, album=album_title, year=year, release_id=release_id
-            )
-            if tracklist:
-                self._review_session.track_titles = list(tracklist)
-                for idx, boundary in enumerate(self._review_session.boundaries):
-                    if idx < len(tracklist):
-                        boundary.track_title = tracklist[idx]
-                self._state.track_list = tuple(tracklist)
-            self._state.album_artist = artist
-            self._state.album_title = album_title
+    def _open_review_dialog(self) -> None:
+        if ReviewDialog is None:
+            self._set_state_field("status_message", "Review dialog is unavailable in this build.")
             self._emit_state_change()
-            self._set_progress(65, f"Album identified: {album_title}")
-        else:
-            self._set_progress(65, "Identification complete.")
-
-        self._evaluate_confidence_and_proceed()
-
-    @Slot(str)
-    def _on_identify_failed(self, message: str) -> None:
-        # Non-fatal — continue without identification
-        self._set_progress(65, "Identification unavailable. Continuing...")
-        self._evaluate_confidence_and_proceed()
-
-    @Slot()
-    def _cleanup_identify_worker(self) -> None:
-        if self._identify_worker is not None:
-            self._identify_worker.deleteLater()
-        self._identify_worker = None
-        self._identify_thread = None
-
-    # ── Confidence gate ────────────────────────────────────────────────
-
-    def _evaluate_confidence_and_proceed(self) -> None:
-        if self._review_session is None:
-            self._on_stage_failed("No review session available.")
             return
 
-        boundaries = list(getattr(self._review_session, "boundaries", []))
-        if not boundaries:
-            self._on_stage_failed("No boundaries detected.")
+        dialog = self._build_review_dialog()
+        if dialog is None:
+            self._set_state_field("status_message", "Review could not be opened.")
+            self._emit_state_change()
             return
 
-        threshold = self._settings.confidence_threshold()
-        scored = [
-            float(getattr(b, "detector_confidence", 0.0) or 0.0)
-            for b in boundaries
-            if getattr(b, "detector_confidence", None) is not None
-        ]
-        avg = sum(scored) / len(scored) if scored else 0.0
-        high_confidence = avg >= threshold and self._settings.auto_split_on_high_confidence
+        self._active_review_dialog = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._active_review_dialog = None
+        self._set_state_field("review_state", "Completed")
+        self._ui_step = FocusedStep.READY_TO_SPLIT
+        self._sync_action_buttons()
+        self._emit_state_change()
 
-        if high_confidence:
-            self._set_progress(67, f"Confidence {avg * 100:.0f}% \u2014 splitting automatically...")
-            self._start_split()
-        else:
-            self._step = _Step.REVIEWING
-            self._update_ui()
-            if avg > 0:
-                threshold_pct = int(threshold * 100)
-                msg = (
-                    f"Average confidence {avg * 100:.0f}% is below the {threshold_pct}% threshold. "
-                    "VinylSplit found boundaries that should be verified."
-                )
-            else:
-                msg = "Track boundaries detected. Please verify them before splitting."
-            self._set_progress(67, msg)
-            self._open_review_workstation()
+        if self._auto_split_check.isChecked():
+            self._start_export()
 
-    def _open_review_workstation(self) -> None:
-        session_dto = self._app_context.review_controller.get_session_dto()
+    def _build_review_dialog(self) -> QWidget | None:
+        recording_path = getattr(self._state, "recording_path", None)
+        if recording_path is None:
+            return None
+
+        session_dto = None
+        get_session_dto = getattr(getattr(self._app_context, "review_controller", None), "get_session_dto", None)
+        if callable(get_session_dto):
+            session_dto = get_session_dto()
+
+        if session_dto is None and self._review_session is not None:
+            session_dto = map_session_to_dto(self._review_session)
+
         if session_dto is not None:
-            dialog = ReviewDialog(session_dto=session_dto, parent=self)
-        else:
-            dialog = ReviewDialog(
-                boundaries=tuple(getattr(self._review_session, "boundaries", ())),
-                parent=self,
-            )
+            boundaries = tuple(self._review_session.boundaries) if self._review_session is not None else None
+            return ReviewDialog(session_dto=session_dto, boundaries=boundaries, parent=self)
 
-        self._status_label.setText(
-            "VinylSplit found boundaries that should be verified. "
-            "Review them and click Accept Changes to continue archiving."
-        )
+        if self._review_session is not None:
+            return ReviewDialog(boundaries=tuple(self._review_session.boundaries), parent=self)
 
-        if dialog.exec() == ReviewDialog.DialogCode.Accepted:
-            self._state.review_state = "Completed"
-            self._emit_state_change()
-            self._start_split()
-        else:
-            self._step = _Step.READY
-            self._state.review_state = "Cancelled"
-            self._emit_state_change()
-            self._set_progress(0, "Review cancelled. Adjust settings or begin again.")
-            self._update_ui()
+        return None
 
-    # ── Split phase ────────────────────────────────────────────────────
-
-    def _start_split(self) -> None:
-        if self._review_session is None or not self._recording_path:
-            self._on_stage_failed("Missing session or recording path.")
+    def _start_export(self) -> None:
+        if self._export_thread is not None:
             return
-        self._step = _Step.SPLITTING
-        self._update_ui()
-        self._set_progress(70, "Splitting album...")
-        self._launch_export_worker()
 
-    def _launch_export_worker(self) -> None:
-        artist = self._archive_info.get("artist") or ""
-        album = self._archive_info.get("album") or ""
-        _no_artist = ("", "Unknown Artist", "Album information couldn't be identified")
-        _no_album = ("", "Unknown Album")
+        recording_path = getattr(self._state, "recording_path", None)
+        if not recording_path:
+            return
+
+        output_directory = self._last_output_directory or QFileDialog.getExistingDirectory(self, "Choose output folder")
+        if not output_directory:
+            return
+
+        self._last_output_directory = output_directory
+        self._set_state_field("status_message", "Archiving your album...")
+        self._set_state_field("progress_label", "Splitting")
+        self._set_state_field("progress_value", 15)
+        self._set_progress_visible(True)
+        self._emit_state_change()
 
         self._export_thread = QThread(self)
         self._export_worker = _FocusedExportWorker(
-            app_context=self._app_context,
-            recording_path=self._recording_path,
-            output_directory=self._output_folder,
-            review_session=self._review_session,
-            artist=artist if artist not in _no_artist else None,
-            album=album if album not in _no_album else None,
+            self._app_context,
+            recording_path,
+            output_directory,
+            self._auto_artwork_check.isChecked(),
         )
         self._export_worker.moveToThread(self._export_thread)
         self._export_thread.started.connect(self._export_worker.run)
         self._export_worker.progress.connect(self._on_export_progress)
         self._export_worker.completed.connect(self._on_export_complete)
-        self._export_worker.failed.connect(self._on_stage_failed)
+        self._export_worker.failed.connect(self._on_export_failed)
         self._export_worker.completed.connect(self._export_thread.quit)
         self._export_worker.failed.connect(self._export_thread.quit)
         self._export_thread.finished.connect(self._cleanup_export_worker)
         self._export_thread.start()
 
-    @Slot(object)
-    def _on_export_progress(self, event: ProgressUpdated) -> None:
-        completed = event.completed or 0
-        total = event.total or 1
-        mapped = 70 + int((completed / max(1, total)) * 29)
-        msg = event.description or event.stage or ""
-        self._set_progress(min(99, mapped), msg)
-
-    @Slot(int)
-    def _on_export_complete(self, exported_tracks: int) -> None:
-        try:
-            from vinylsplit.utils import sanitize_filename
-            artist = self._archive_info.get("artist", "")
-            album = self._archive_info.get("album", "")
-            _no_artist = ("", "Unknown Artist", "Album information couldn't be identified")
-            _no_album = ("", "Unknown Album")
-            if artist not in _no_artist and album not in _no_album:
-                folder_name = sanitize_filename(f"{artist} - {album}")
-            elif album not in _no_album:
-                folder_name = sanitize_filename(album)
-            else:
-                folder_name = "Album"
-            self._last_exported_folder = str(Path(self._output_folder) / folder_name)
-        except Exception:
-            self._last_exported_folder = self._output_folder
-
-        self._step = _Step.COMPLETE
-        self._set_progress(100, "Archive complete.")
-        self._state.recording_info = f"Archive complete: {exported_tracks} FLAC tracks"
-        self._state.status_message = "Archive complete."
+    @Slot(int, int, str)
+    def _on_export_progress(self, completed: int, total: int, message: str) -> None:
+        total = max(1, total)
+        self._set_state_field("progress_value", max(0, min(100, int((completed / total) * 100))))
+        self._set_state_field("progress_label", message)
+        self._set_state_field("status_message", message)
         self._emit_state_change()
-        self._show_archive_complete(exported_tracks)
+
+    @Slot(object)
+    def _on_export_complete(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        output_directory = data.get("output_directory") or self._last_output_directory
+        exported_tracks = data.get("exported_tracks") or []
+        self._set_state_field("analysis_state", "Complete")
+        self._set_state_field("review_state", "Completed")
+        self._set_state_field("progress_label", "Archive complete")
+        self._set_state_field("progress_value", 100)
+        self._set_state_field("status_message", "Archive complete.")
+        self._set_progress_visible(False)
+        self._ui_step = FocusedStep.ARCHIVE_COMPLETE
+        self._emit_state_change()
+
+        if output_directory:
+            self._last_output_directory = str(output_directory)
+
+        if exported_tracks:
+            self._set_state_field("recording_info", f"Archive complete: {len(exported_tracks)} tracks saved.")
+        self._sync_action_buttons()
+
+    @Slot(str)
+    def _on_export_failed(self, message: str) -> None:
+        self._set_state_field("status_message", f"Archive failed: {message}")
+        self._set_state_field("progress_label", "Archive failed")
+        self._set_state_field("progress_value", 0)
+        self._set_progress_visible(False)
+        self._emit_state_change()
 
     @Slot()
     def _cleanup_export_worker(self) -> None:
@@ -695,158 +578,112 @@ class FocusedWorkspace(QWidget):
             self._export_worker.deleteLater()
         self._export_worker = None
         self._export_thread = None
-
-    @Slot(str)
-    def _on_stage_failed(self, message: str) -> None:
-        self._step = _Step.FAILED
-        self._update_ui()
-        self._set_progress(0, f"Error: {message}")
-
-    def _cancel_pipeline(self) -> None:
-        self._shutdown_background_threads()
-        self._step = _Step.READY if self._recording_path else _Step.WELCOME
-        self._update_ui()
-        self._set_progress(0, "Processing cancelled.")
-
-    # ------------------------------------------------------------------
-    # Archive complete screen
-    # ------------------------------------------------------------------
-
-    def _show_archive_complete(self, track_count: int) -> None:
-        artist = self._archive_info.get("artist", "")
-        album = self._archive_info.get("album", "")
-        year = self._archive_info.get("year", "")
-        _no_artist = ("", "Unknown Artist", "Album information couldn't be identified")
-
-        if artist not in _no_artist and album:
-            album_line = f"{artist} \u2013 {album}"
-        elif album:
-            album_line = album
-        else:
-            album_line = Path(self._recording_path or "").stem
-
-        if year:
-            album_line += f"  ({year})"
-
-        self._complete_album_label.setText(album_line)
-        details = [
-            f"{track_count} FLAC tracks created",
-            "Metadata embedded",
-            "Artwork embedded",
-        ]
-        self._complete_detail_label.setText("\n".join(details))
-        folder = self._last_exported_folder or self._output_folder
-        self._complete_path_label.setText(f"Saved to:\n{folder}")
-        self._pages.setCurrentIndex(1)
+        self._sync_action_buttons()
 
     def _open_output_folder(self) -> None:
-        folder = self._last_exported_folder or self._output_folder
-        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        output_directory = self._last_output_directory
+        if not output_directory:
+            output_directory = QFileDialog.getExistingDirectory(self, "Choose output folder")
+            if not output_directory:
+                return
+            self._last_output_directory = output_directory
 
-    def _reset_to_welcome(self) -> None:
-        self._recording_path = None
+        QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
+
+    def _reset_for_next_album(self) -> None:
+        self._clear_artwork_preview()
+        self._set_state_field("recording_path", None)
+        self._set_state_field("recording_info", None)
+        self._set_state_field("album_artist", None)
+        self._set_state_field("album_title", None)
+        self._set_state_field("analysis_state", "Idle")
+        self._set_state_field("review_state", "Pending")
+        self._set_state_field("status_message", "Ready for the next album.")
+        self._set_state_field("progress_label", "Idle")
+        self._set_state_field("progress_value", 0)
+        self._set_state_field("track_list", tuple())
         self._review_session = None
-        self._last_exported_folder = None
-        self._archive_info = {}
-        self._step = _Step.WELCOME
-        self._recording_label.setText("No recording selected")
-        self._state = WorkspaceViewState()
-        self._pages.setCurrentIndex(0)
-        self._set_progress(0, "")
-        self._update_ui()
+        self._analysis_result = None
+        self._ui_step = FocusedStep.WELCOME
+        self._set_progress_visible(False)
         self._emit_state_change()
 
-    # ------------------------------------------------------------------
-    # UI sync helpers
-    # ------------------------------------------------------------------
+    def _sync_action_buttons(self) -> None:
+        has_recording = bool(getattr(self._state, "recording_path", None))
+        busy = self._analyze_thread is not None or self._export_thread is not None
+        has_tracks = bool(tuple(getattr(self._state, "track_list", ()) or ()))
+        review_complete = getattr(self._state, "review_state", "") == "Completed"
 
-    def _set_progress(self, value: int, message: str) -> None:
-        self._progress_bar.setValue(max(0, min(100, value)))
-        self._status_label.setText(message)
-        self._state.progress_value = value
-        self._state.progress_label = message
-        self._state.status_message = message
+        self._archive_button.setEnabled(has_recording and not busy)
+        self._review_button.setEnabled(has_tracks and not busy)
+        self._split_button.setEnabled(has_tracks and (review_complete or self._auto_split_check.isChecked()) and not busy)
+        self._open_output_button.setEnabled(bool(self._last_output_directory))
+        self._archive_again_button.setEnabled(self._ui_step is FocusedStep.ARCHIVE_COMPLETE)
 
-    def _update_ui(self) -> None:
-        processing = self._step in (_Step.ANALYZING, _Step.IDENTIFYING, _Step.SPLITTING)
-        complete = self._step == _Step.COMPLETE
-        ready_to_start = self._step in (_Step.READY, _Step.FAILED) and bool(self._recording_path)
+    def _set_progress_visible(self, visible: bool) -> None:
+        self._progress_card.setVisible(visible)
 
-        self._browse_button.setEnabled(not processing and not complete)
-        self._output_button.setEnabled(not processing and not complete)
+    def _update_artwork_preview(self, artwork: bytes) -> None:
+        pixmap = QPixmap()
+        if pixmap.loadFromData(artwork):
+            self._artwork_label.setPixmap(
+                pixmap.scaled(
+                    180,
+                    180,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            self._artwork_label.setText("")
+            self._artwork_available = True
+            return
+        self._clear_artwork_preview()
 
-        manual_mode = not self._settings.auto_analyze and ready_to_start
-        self._begin_button.setVisible(bool(manual_mode))
-        self._begin_button.setEnabled(bool(manual_mode))
-        self._cancel_button.setVisible(processing)
+    def _clear_artwork_preview(self) -> None:
+        self._artwork_label.clear()
+        self._artwork_label.setText("No artwork")
+        self._artwork_available = False
 
-        stage_text = {
-            _Step.WELCOME: "Drop a recording to begin.",
-            _Step.READY: "Recording loaded.",
-            _Step.ANALYZING: "Analyzing recording...",
-            _Step.IDENTIFYING: "Identifying album...",
-            _Step.SPLITTING: "Archiving tracks...",
-            _Step.REVIEWING: "Review Required",
-            _Step.COMPLETE: "",
-            _Step.FAILED: "Processing Failed",
-        }.get(self._step, "")
-        self._stage_label.setText(stage_text)
+    def _review_threshold_value(self) -> float:
+        value = self._review_threshold_combo.currentData()
+        return float(value) if value is not None else 0.85
 
-        if hasattr(self._drop_zone, "set_compact"):
-            self._drop_zone.set_compact(bool(self._recording_path))
+    def _on_review_threshold_changed(self, index: int) -> None:
+        self._set_state_field("focused_review_threshold", self._review_threshold_combo.currentText())
+
+    def _set_state_field(self, name: str, value: Any) -> None:
+        try:
+            setattr(self._state, name, value)
+        except Exception:
+            pass
 
     def _emit_state_change(self) -> None:
+        self._sync_state_from_model()
         self.state_changed.emit(self._state)
 
-    # ------------------------------------------------------------------
-    # Thread lifecycle
-    # ------------------------------------------------------------------
-
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self._shutdown_active_review_dialog()
         self._shutdown_background_threads()
         super().closeEvent(event)
 
+    def _shutdown_active_review_dialog(self) -> None:
+        dialog = self._active_review_dialog
+        if dialog is not None:
+            dialog.close()
+        self._active_review_dialog = None
+
     def _shutdown_background_threads(self) -> None:
-        for thread in (self._analyze_thread, self._identify_thread, self._export_thread):
+        for thread in (self._analyze_thread, self._export_thread):
             if thread is not None and thread.isRunning():
                 thread.requestInterruption()
                 thread.quit()
-                if not thread.wait(5000):
+                if not thread.wait(3000):
                     thread.terminate()
-                    thread.wait(2000)
-
-    # ------------------------------------------------------------------
-    # Drag-and-drop
-    # ------------------------------------------------------------------
-
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:  # noqa: N802
-        event.accept()
-
-    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
-        for url in event.mimeData().urls():
-            path = Path(url.toLocalFile())
-            if path.exists() and path.is_file():
-                self._on_file_selected(str(path))
-                event.acceptProposedAction()
-                return
-        event.ignore()
-
-
-# ---------------------------------------------------------------------------
-# Background workers
-# ---------------------------------------------------------------------------
+                    thread.wait(1000)
 
 
 class _FocusedAnalyzeWorker(QObject):
-    """Boundary detection + metadata lookup in background."""
-
-    progress = Signal(int, str)
+    progress = Signal(int, int, str)
     completed = Signal(object)
     failed = Signal(str)
 
@@ -858,155 +695,109 @@ class _FocusedAnalyzeWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            self.progress.emit(10, "Detecting silence regions...")
-            review_result = self._app_context.review_controller.review(self._recording_path)
-            self.progress.emit(70, "Looking up metadata...")
+            self.progress.emit(1, 4, "Analyzing recording...")
+            review_controller = getattr(self._app_context, "review_controller", None)
+            analyze_controller = getattr(self._app_context, "analyze_controller", None)
+            review_result = None
+            if review_controller is not None and hasattr(review_controller, "review"):
+                review_result = review_controller.review(self._recording_path)
+
+            self.progress.emit(2, 4, "Looking up metadata...")
             metadata_match = None
-            try:
-                result = self._app_context.analyze_controller.lookup_metadata(self._recording_path)
-                metadata_match = result.match
-            except Exception:
-                metadata_match = None
-            self.progress.emit(100, "Analysis complete.")
-            self.completed.emit({
-                "review_session": review_result.session,
-                "metadata_match": metadata_match,
-            })
-        except Exception as exc:
-            self.failed.emit(str(exc))
+            release_tracklist: list[str] = []
+            release_artwork: bytes | None = None
+            if analyze_controller is not None and hasattr(analyze_controller, "lookup_metadata"):
+                try:
+                    metadata = analyze_controller.lookup_metadata(self._recording_path)
+                    metadata_match = getattr(metadata, "match", None)
+                except Exception:
+                    metadata_match = None
 
+            release_id = getattr(metadata_match, "release_id", "") if metadata_match is not None else ""
+            if release_id:
+                try:
+                    release_tracklist = self._app_context.pipeline.resolver.musicbrainz.tracklist(release_id)
+                except Exception:
+                    release_tracklist = []
 
-class _FocusedIdentifyWorker(QObject):
-    """Per-track deep identification in background."""
+                try:
+                    release_artwork = self._app_context.pipeline.artwork.download_artwork(release_id)
+                except Exception:
+                    release_artwork = None
 
-    progress = Signal(int, str)
-    completed = Signal(object)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        app_context: ApplicationContext,
-        recording_path: str,
-        review_session: object,
-    ) -> None:
-        super().__init__()
-        self._app_context = app_context
-        self._recording_path = recording_path
-        self._review_session = review_session
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            thread = QThread.currentThread()
-            boundaries = list(getattr(self._review_session, "boundaries", ()) or ())
-            if not boundaries:
-                self.completed.emit({"album": None, "tracklist": []})
-                return
-            identified = []
-            with TemporaryDirectory(prefix="vinylsplit-focused-") as tmp_dir:
-                tracks = self._app_context.pipeline.splitter.split(
-                    filename=self._recording_path,
-                    boundaries=boundaries,
-                    output_directory=tmp_dir,
+            confidence = 0.0
+            if review_result is not None:
+                session = getattr(review_result, "session", None)
+                confidence = float(
+                    getattr(session, "average_confidence", None)
+                    or getattr(review_result, "confidence", None)
+                    or 0.0
                 )
-                total = max(1, len(tracks))
-                for index, track in enumerate(tracks, start=1):
-                    if thread.isInterruptionRequested():
-                        self.failed.emit("Cancelled")
-                        return
-                    self.progress.emit(
-                        int((index - 1) / total * 100),
-                        f"Identifying track {index}/{total}...",
-                    )
-                    try:
-                        match = self._app_context.pipeline.identifier.identify(
-                            source_file=self._recording_path,
-                            track=track,
-                        )
-                        identified.append((track, match))
-                    except Exception:
-                        continue
-            if not identified:
-                self.completed.emit({"album": None, "tracklist": []})
-                return
-            album, tracklist = self._app_context.pipeline.resolver.resolve(identified)
-            self.completed.emit({"album": album, "tracklist": tracklist})
+
+            self.progress.emit(3, 4, "Preparing archive...")
+            self.completed.emit(
+                {
+                    "review_result": review_result,
+                    "metadata_match": metadata_match,
+                    "release_tracklist": release_tracklist,
+                    "release_artwork": release_artwork,
+                    "confidence": confidence,
+                }
+            )
         except Exception as exc:
             self.failed.emit(str(exc))
 
 
 class _FocusedExportWorker(QObject):
-    """Full export pipeline — split + metadata + artwork."""
-
-    progress = Signal(object)
-    completed = Signal(int)
+    progress = Signal(int, int, str)
+    completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(
-        self,
-        app_context: ApplicationContext,
-        recording_path: str,
-        output_directory: str,
-        review_session: object,
-        artist: str | None = None,
-        album: str | None = None,
-    ) -> None:
+    def __init__(self, app_context: ApplicationContext, recording_path: str, output_directory: str, fetch_artwork: bool) -> None:
         super().__init__()
         self._app_context = app_context
         self._recording_path = recording_path
         self._output_directory = output_directory
-        self._review_session = review_session
-        self._artist = artist
-        self._album = album
+        self._fetch_artwork = fetch_artwork
 
     @Slot()
     def run(self) -> None:
-        def on_progress(event: ProgressUpdated) -> None:
-            self.progress.emit(event)
-
         try:
-            result = asyncio.run(
-                self._app_context.export_controller.export(
-                    filename=self._recording_path,
-                    output_directory=self._output_directory,
-                    artist=self._artist,
-                    album=self._album,
-                    review_session=self._review_session,
-                    progress_callback=on_progress,
-                )
-            )
+            self.progress.emit(1, 3, "Splitting audio...")
+            process_fn = None
+            for candidate_name in ("process_controller", "pipeline", "split_controller"):
+                candidate = getattr(self._app_context, candidate_name, None)
+                if candidate is None:
+                    continue
+                process_fn = getattr(candidate, "process", None)
+                if process_fn is not None:
+                    break
+
+            exported_tracks: list[str] = []
+            if callable(process_fn):
+                try:
+                    result = process_fn(self._recording_path, self._output_directory)
+                except TypeError:
+                    result = process_fn(self._recording_path, output_directory=self._output_directory)
+                exported_tracks = list(getattr(result, "exported_tracks", []) or [])
+
+            if self._fetch_artwork:
+                for candidate_name in ("artwork_service", "coverart_service"):
+                    candidate = getattr(self._app_context, candidate_name, None)
+                    if candidate is None:
+                        continue
+                    artwork_fn = getattr(candidate, "download", None) or getattr(candidate, "fetch", None) or getattr(candidate, "attach", None)
+                    if callable(artwork_fn):
+                        try:
+                            artwork_fn(self._recording_path, self._output_directory)
+                        except TypeError:
+                            try:
+                                artwork_fn(self._recording_path)
+                            except Exception:
+                                pass
+                        break
+
+            self.progress.emit(2, 3, "Finalizing archive...")
+            self.completed.emit({"output_directory": self._output_directory, "exported_tracks": exported_tracks})
         except Exception as exc:
             self.failed.emit(str(exc))
-            return
-        self.completed.emit(result.exported_tracks)
-
-
-# ---------------------------------------------------------------------------
-# Font helpers
-# ---------------------------------------------------------------------------
-
-
-def _title_font() -> QFont:
-    desired = [
-        "Friz Quadrata Bold", "Friz Quadrata", "Cinzel",
-        "Times New Roman", "Georgia", "Noto Serif", "DejaVu Serif",
-    ]
-    available = {family.lower(): family for family in QFontDatabase.families()}
-    for family in desired:
-        match = available.get(family.lower())
-        if match:
-            font = QFont(match, 30)
-            font.setBold(True)
-            return font
-    fallback = QFont()
-    fallback.setPointSize(30)
-    fallback.setBold(True)
-    return fallback
-
-
-def _tagline_font() -> QFont:
-    title = _title_font()
-    font = QFont(title)
-    font.setPointSize(13)
-    font.setBold(False)
-    return font
