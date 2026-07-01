@@ -8,7 +8,7 @@ import numpy as np
 import soundfile as sf
 
 from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -82,38 +84,30 @@ class ReviewDialog(QDialog):
         self._shortcuts: list[QShortcut] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(18, 16, 18, 16)
-        root.setSpacing(12)
-
-        title = QLabel("Boundary Review")
-        title.setObjectName("SectionTitle")
-
-        intro = QLabel(
-            "Review detected boundaries before splitting. "
-            "Select a track to inspect timing and confidence details."
-        )
-        intro.setObjectName("StatusBarText")
-        intro.setWordWrap(True)
+        root.setContentsMargins(12, 8, 12, 12)
+        root.setSpacing(8)
 
         top_split = QSplitter(Qt.Orientation.Horizontal)
 
-        left_panel = self._build_tracks_panel()
-        right_panel = self._build_inspector_panel()
+        tracks_panel = self._build_tracks_panel()
+        inspector_panel = self._build_inspector_panel()
 
-        top_split.addWidget(left_panel)
-        top_split.addWidget(right_panel)
+        top_split.addWidget(tracks_panel)
+        top_split.addWidget(inspector_panel)
         top_split.setStretchFactor(0, 3)
         top_split.setStretchFactor(1, 2)
         top_split.setSizes([760, 430])
 
-        bottom_panel = self._build_waveform_panel()
-        toolbar = self._build_toolbar()
+        self._waveform_box = self._build_waveform_box()
 
-        root.addWidget(title)
-        root.addWidget(intro)
-        root.addWidget(top_split, stretch=4)
-        root.addWidget(bottom_panel, stretch=3)
-        root.addLayout(toolbar)
+        self._main_split = QSplitter(Qt.Orientation.Vertical)
+        self._main_split.addWidget(top_split)
+        self._main_split.addWidget(self._waveform_box)
+        self._main_split.setStretchFactor(0, 3)
+        self._main_split.setStretchFactor(1, 4)
+        self._main_split.setSizes([320, 380])
+
+        root.addWidget(self._main_split, stretch=1)
 
         self._populate_tracks_table()
         self._init_playback_engine()
@@ -131,9 +125,6 @@ class ReviewDialog(QDialog):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        header = QLabel("TRACKS")
-        header.setObjectName("SectionTitle")
-
         self._tracks_table = QTableWidget()
         self._tracks_table.setObjectName("ReviewTracksTable")
         self._tracks_table.setColumnCount(6)
@@ -146,9 +137,10 @@ class ReviewDialog(QDialog):
         self._tracks_table.setAlternatingRowColors(True)
         self._tracks_table.verticalHeader().setVisible(False)
         self._tracks_table.verticalHeader().setDefaultSectionSize(38)
-        header = self._tracks_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        header.setStretchLastSection(False)
+        self._tracks_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table_header = self._tracks_table.horizontalHeader()
+        table_header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        table_header.setStretchLastSection(False)
         self._tracks_table.setColumnWidth(0, 72)
         self._tracks_table.setColumnWidth(1, 280)
         self._tracks_table.setColumnWidth(2, 110)
@@ -156,8 +148,26 @@ class ReviewDialog(QDialog):
         self._tracks_table.setColumnWidth(4, 110)
         self._tracks_table.setColumnWidth(5, 120)
 
-        layout.addWidget(header)
-        layout.addWidget(self._tracks_table, stretch=1)
+        self._tracks_artwork_label = QLabel("No artwork")
+        self._tracks_artwork_label.setObjectName("ArtworkPlaceholder")
+        self._tracks_artwork_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._tracks_artwork_label.setMinimumSize(200, 200)
+
+        tracks_artwork_wrap = QFrame()
+        tracks_artwork_wrap.setObjectName("Card")
+        tracks_artwork_layout = QVBoxLayout(tracks_artwork_wrap)
+        tracks_artwork_layout.setContentsMargins(10, 10, 10, 10)
+        tracks_artwork_layout.setSpacing(0)
+        tracks_artwork_layout.addStretch(1)
+        tracks_artwork_layout.addWidget(self._tracks_artwork_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        tracks_artwork_layout.addStretch(1)
+
+        content_row = QHBoxLayout()
+        content_row.setSpacing(10)
+        content_row.addWidget(self._tracks_table, stretch=4)
+        content_row.addWidget(tracks_artwork_wrap, stretch=2)
+
+        layout.addLayout(content_row, stretch=1)
         return panel
 
     def _build_inspector_panel(self) -> QFrame:
@@ -177,6 +187,8 @@ class ReviewDialog(QDialog):
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
         self._track_card = _info_card("Track Number")
         self._start_card = _info_card("Start Time")
@@ -223,16 +235,44 @@ class ReviewDialog(QDialog):
         layout.addStretch(1)
         return panel
 
-    def _build_waveform_panel(self) -> QFrame:
-        panel = QFrame()
-        panel.setObjectName("ReviewWaveformPlaceholder")
+    def set_album_artwork(self, pixmap: QPixmap | None) -> None:
+        target = getattr(self, "_tracks_artwork_label", None)
+        if not isinstance(target, QLabel):
+            return
 
-        self._waveform_layout = QVBoxLayout(panel)
+        if pixmap is None or pixmap.isNull():
+            target.clear()
+            target.setText("No artwork")
+            return
+
+        target.setPixmap(
+            pixmap.scaled(
+                180,
+                180,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        target.setText("")
+
+    def _build_waveform_box(self) -> QFrame:
+        box = QFrame()
+        box.setObjectName("Card")
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(10, 10, 10, 10)
+        box_layout.setSpacing(8)
+
+        self._waveform_panel = QFrame()
+        self._waveform_panel.setObjectName("ReviewWaveformPlaceholder")
+        self._waveform_layout = QVBoxLayout(self._waveform_panel)
         self._waveform_layout.setContentsMargins(8, 8, 8, 8)
         self._waveform_layout.setSpacing(0)
+        self._waveform_panel.setMinimumHeight(420)
 
         self._show_waveform_placeholder("Select a track to view candidate waveform markers.")
-        return panel
+        box_layout.addWidget(self._waveform_panel, stretch=1)
+        box_layout.addLayout(self._build_toolbar())
+        return box
 
     def _show_waveform_placeholder(self, subtitle_text: str) -> None:
         self._clear_layout(self._waveform_layout)
@@ -281,31 +321,55 @@ class ReviewDialog(QDialog):
         layout = QHBoxLayout()
         layout.setSpacing(10)
 
-        self._play_button = QPushButton("Play")
-        self._play_button.setObjectName("SecondaryButton")
-        self._play_button.setMinimumHeight(38)
+        self._play_button = QToolButton()
+        self._play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self._play_button.setToolTip("Play")
+        self._play_button.setAutoRaise(False)
         self._play_button.clicked.connect(self._on_play)
 
-        self._pause_button = QPushButton("Pause")
-        self._pause_button.setObjectName("SecondaryButton")
-        self._pause_button.setMinimumHeight(38)
+        self._pause_button = QToolButton()
+        self._pause_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+        self._pause_button.setToolTip("Pause")
+        self._pause_button.setAutoRaise(False)
         self._pause_button.clicked.connect(self._on_pause)
 
-        self._stop_button = QPushButton("Stop")
-        self._stop_button.setObjectName("SecondaryButton")
-        self._stop_button.setMinimumHeight(38)
+        self._stop_button = QToolButton()
+        self._stop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self._stop_button.setToolTip("Stop")
+        self._stop_button.setAutoRaise(False)
         self._stop_button.clicked.connect(self._on_stop)
 
-        self._play_boundary_button = QPushButton("Play From Boundary")
-        self._play_boundary_button.setObjectName("SecondaryButton")
-        self._play_boundary_button.setMinimumHeight(38)
+        self._play_boundary_button = QToolButton()
+        self._play_boundary_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
+        self._play_boundary_button.setToolTip("Play from boundary")
+        self._play_boundary_button.setAutoRaise(False)
         self._play_boundary_button.clicked.connect(self._play_from_selected_boundary)
 
-        self._loop_button = QPushButton("LOOP")
-        self._loop_button.setObjectName("SecondaryButton")
-        self._loop_button.setMinimumHeight(38)
+        self._next_boundary_button = QToolButton()
+        self._next_boundary_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSeekForward))
+        self._next_boundary_button.setToolTip("Skip to next boundary")
+        self._next_boundary_button.setAutoRaise(False)
+        self._next_boundary_button.clicked.connect(self._skip_to_next_boundary)
+
+        self._loop_button = QToolButton()
+        self._loop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self._loop_button.setToolTip("Loop playback")
+        self._loop_button.setAutoRaise(False)
         self._loop_button.setCheckable(True)
         self._loop_button.toggled.connect(self._on_loop_toggled)
+
+        self._loop_indicator = QLabel()
+        self._loop_indicator.setFixedSize(12, 12)
+        self._loop_indicator.setToolTip("Loop status")
+        self._set_loop_indicator(False)
+
+        self._exporting_indicator = QLabel()
+        self._exporting_indicator.setFixedSize(12, 12)
+        self._exporting_indicator.setToolTip("Export status")
+        self._set_exporting_indicator(False)
+
+        self._exporting_label = QLabel("Exporting")
+        self._exporting_label.setObjectName("StatusBarText")
 
         self._playback_position_label = QLabel("Position: 00:00.00")
         self._playback_position_label.setObjectName("StatusBarText")
@@ -314,7 +378,12 @@ class ReviewDialog(QDialog):
         layout.addWidget(self._pause_button)
         layout.addWidget(self._stop_button)
         layout.addWidget(self._play_boundary_button)
+        layout.addWidget(self._next_boundary_button)
         layout.addWidget(self._loop_button)
+        layout.addWidget(self._loop_indicator)
+        layout.addSpacing(6)
+        layout.addWidget(self._exporting_indicator)
+        layout.addWidget(self._exporting_label)
         layout.addWidget(self._playback_position_label)
         layout.addStretch(1)
 
@@ -336,6 +405,21 @@ class ReviewDialog(QDialog):
         layout.addWidget(reset_button)
         layout.addWidget(accept_button)
         return layout
+
+    def _set_loop_indicator(self, enabled: bool) -> None:
+        color = "#22c55e" if enabled else "#14532d"
+        self._loop_indicator.setStyleSheet(
+            f"border-radius: 6px; background-color: {color}; border: 1px solid #0b2f1a;"
+        )
+
+    def _set_exporting_indicator(self, exporting: bool) -> None:
+        color = "#ef4444" if exporting else "#3f1d1d"
+        self._exporting_indicator.setStyleSheet(
+            f"border-radius: 6px; background-color: {color}; border: 1px solid #3f1d1d;"
+        )
+
+    def set_exporting_active(self, exporting: bool) -> None:
+        self._set_exporting_indicator(exporting)
 
     def _populate_tracks_table(self) -> None:
         boundaries = list(self._boundaries)
@@ -595,6 +679,14 @@ class ReviewDialog(QDialog):
         snapshot = self._redo_stack.pop()
         self._restore_snapshot(snapshot)
 
+    def undo_last_edit(self) -> None:
+        """Public hook for external undo action bindings."""
+        self._undo_last_edit()
+
+    def redo_last_edit(self) -> None:
+        """Public hook for external redo action bindings."""
+        self._redo_last_edit()
+
     def _set_boundary_locked(self, row: int) -> None:
         boundary = self._boundaries[row]
         if hasattr(boundary, "state"):
@@ -608,7 +700,14 @@ class ReviewDialog(QDialog):
     def _set_refine_busy(self, busy: bool) -> None:
         self._tracks_table.setEnabled(not busy)
         self._boundary_time_input.setEnabled(not busy)
-        for button in (self._play_button, self._pause_button, self._stop_button, self._play_boundary_button, self._loop_button):
+        for button in (
+            self._play_button,
+            self._pause_button,
+            self._stop_button,
+            self._play_boundary_button,
+            self._next_boundary_button,
+            self._loop_button,
+        ):
             button.setEnabled(not busy)
         self._selection_label.setText("Current selection: refining boundary anchors..." if busy else self._selection_label.text())
 
@@ -753,6 +852,7 @@ class ReviewDialog(QDialog):
         self._pause_button.setEnabled(enabled)
         self._stop_button.setEnabled(enabled)
         self._play_boundary_button.setEnabled(enabled)
+        self._next_boundary_button.setEnabled(enabled)
 
     def _on_play(self) -> None:
         if self._player is not None:
@@ -791,6 +891,22 @@ class ReviewDialog(QDialog):
         self._seek_playback(segment_start)
         if self._player is not None:
             self._player.play()
+
+    def _skip_to_next_boundary(self) -> None:
+        was_playing = (
+            self._player is not None
+            and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        )
+        current_seconds = self._current_playhead_seconds()
+        for index, boundary_time in enumerate(self._editable_starts):
+            if boundary_time > (current_seconds + 0.01):
+                self._seek_playback(boundary_time)
+                if 0 <= index < self._tracks_table.rowCount():
+                    self._tracks_table.selectRow(index)
+                if was_playing and self._player is not None:
+                    self._player.play()
+                return
+        self._selection_label.setText("Current selection: already at final boundary")
 
     def _seek_playback(self, seconds: float) -> None:
         if self._player is None:
@@ -853,14 +969,17 @@ class ReviewDialog(QDialog):
             self._tracks_table.selectRow(crossed_index)
 
     def _selected_boundary_window(self) -> tuple[float, float]:
+        """Return selected track playback window (boundary -> next boundary)."""
+
         row = self._current_selected_row()
         if row is None:
             return 0.0, max(2.0, self._estimate_session_duration())
 
-        center = self._start_for_row(row)
-        start = max(0.0, center - self._boundary_pre_roll_seconds)
-        end = center + self._boundary_post_roll_seconds
+        start = self._start_for_row(row)
+        end = self._track_end_seconds(row)
         session_end = self._estimate_session_duration()
+        if end is None:
+            end = session_end
         end = min(max(end, start + 0.25), session_end)
         return start, end
 
@@ -882,6 +1001,7 @@ class ReviewDialog(QDialog):
         return start, end
 
     def _on_loop_toggled(self, checked: bool) -> None:
+        self._set_loop_indicator(checked)
         if checked:
             self._loop_center_seconds = self._current_playhead_seconds()
             return

@@ -3,13 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
-from PySide6.QtGui import QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import QGraphicsOpacityEffect
 from PySide6.QtWidgets import (
     QApplication,
-    QHBoxLayout,
     QMainWindow,
-    QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -47,25 +45,18 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(14)
 
-        header = QHBoxLayout()
-        header.setSpacing(10)
-        header.addStretch(1)
-
-        self._settings_button = QPushButton("Settings")
-        self._settings_button.clicked.connect(self._open_playback_settings)
-        header.addWidget(self._settings_button)
-
         self._stack = QStackedWidget()
 
         self._focused_workspace = FocusedWorkspace(app_context=self._app_context)
+        self._focused_workspace.enable_top_menu_mode(True)
         self._stack.addWidget(self._focused_workspace)
         self._stack.setCurrentWidget(self._focused_workspace)
         self._theme_manager.appearance_applied.connect(self._animate_theme_transition)
 
-        layout.addLayout(header)
         layout.addWidget(self._stack, stretch=1)
 
         self.setCentralWidget(root)
+        self._build_top_menus()
 
         self._opacity_effect = QGraphicsOpacityEffect(self._stack)
         self._stack.setGraphicsEffect(self._opacity_effect)
@@ -81,6 +72,78 @@ class MainWindow(QMainWindow):
             self._theme_manager.apply_mode(dialog.selected_mode())
             self._focused_workspace.set_preferred_output_directory(dialog.selected_output_directory())
             self._focused_workspace.set_preferred_output_format(dialog.selected_output_format())
+
+    def _build_top_menus(self) -> None:
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("File")
+        select_action = QAction("Select Recording", self)
+        select_action.triggered.connect(self._focused_workspace.menu_select_recording)
+        file_menu.addAction(select_action)
+
+        analyze_action = QAction("Analyze Now", self)
+        analyze_action.triggered.connect(self._focused_workspace.menu_archive_now)
+        file_menu.addAction(analyze_action)
+
+        review_action = QAction("Open Review", self)
+        review_action.triggered.connect(self._focused_workspace.menu_open_review)
+        file_menu.addAction(review_action)
+
+        split_action = QAction("Split", self)
+        split_action.triggered.connect(self._focused_workspace.menu_split)
+        file_menu.addAction(split_action)
+
+        output_action = QAction("Open Output Folder", self)
+        output_action.triggered.connect(self._focused_workspace.menu_open_output_folder)
+        file_menu.addAction(output_action)
+
+        file_menu.addSeparator()
+        reset_action = QAction("Archive Another Album", self)
+        reset_action.triggered.connect(self._focused_workspace.menu_archive_another_album)
+        file_menu.addAction(reset_action)
+
+        edit_menu = menu_bar.addMenu("Edit")
+        undo_action = QAction("Undo", self)
+        undo_action.setShortcut("Ctrl+Z")
+        undo_action.triggered.connect(self._focused_workspace.menu_undo)
+        edit_menu.addAction(undo_action)
+
+        redo_action = QAction("Redo", self)
+        redo_action.setShortcut("Ctrl+Y")
+        redo_action.triggered.connect(self._focused_workspace.menu_redo)
+        edit_menu.addAction(redo_action)
+
+        settings_menu = menu_bar.addMenu("Settings")
+
+        open_settings_action = QAction("Open Settings...", self)
+        open_settings_action.triggered.connect(self._open_playback_settings)
+        settings_menu.addAction(open_settings_action)
+
+        settings_menu.addSeparator()
+
+        auto_analyze_action = QAction("Automatically Analyze", self)
+        auto_analyze_action.setCheckable(True)
+        auto_analyze_action.setChecked(self._focused_workspace.auto_analyze_enabled())
+        auto_analyze_action.toggled.connect(self._focused_workspace.set_auto_analyze_enabled)
+        settings_menu.addAction(auto_analyze_action)
+
+        auto_review_action = QAction("Open Review Only When Needed", self)
+        auto_review_action.setCheckable(True)
+        auto_review_action.setChecked(self._focused_workspace.auto_review_enabled())
+        auto_review_action.toggled.connect(self._focused_workspace.set_auto_review_enabled)
+        settings_menu.addAction(auto_review_action)
+
+        auto_split_action = QAction("Automatically Split When Confident", self)
+        auto_split_action.setCheckable(True)
+        auto_split_action.setChecked(self._focused_workspace.auto_split_enabled())
+        auto_split_action.toggled.connect(self._focused_workspace.set_auto_split_enabled)
+        settings_menu.addAction(auto_split_action)
+
+        auto_artwork_action = QAction("Automatically Fetch Artwork", self)
+        auto_artwork_action.setCheckable(True)
+        auto_artwork_action.setChecked(self._focused_workspace.auto_artwork_enabled())
+        auto_artwork_action.toggled.connect(self._focused_workspace.set_auto_artwork_enabled)
+        settings_menu.addAction(auto_artwork_action)
 
     def begin_startup_flow(self, selection: StartupWizardSelection) -> None:
         self._focused_workspace.begin_startup_flow(selection)

@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QSettings, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QThread, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QDragEnterEvent, QDropEvent, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QProgressBar,
     QVBoxLayout,
     QWidget,
 )
@@ -72,6 +71,10 @@ class FocusedWorkspace(QWidget):
         self._workspace_manager: Any | None = None
         self._active_review_dialog: QWidget | None = None
         self._embedded_review_editor: ReviewDialog | None = None
+        self._editing_layout_mode = False
+        self._menu_mode_enabled = False
+        self._progress_visible = False
+        self._open_output_after_export = False
         self._settings = QSettings()
         self._last_output_directory = self._preferred_output_directory()
 
@@ -95,18 +98,36 @@ class FocusedWorkspace(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(12, 8, 12, 12)
+        root.setSpacing(8)
+        self._root_layout = root
 
-        title = QLabel("VinylSplit")
-        title.setObjectName("focusedTitle")
-        subtitle = QLabel("Load one recording, review boundaries, refine edits, and export from this workspace.")
-        subtitle.setWordWrap(True)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
 
-        root.addWidget(title)
-        root.addWidget(subtitle)
+        text_header = QVBoxLayout()
+        text_header.setSpacing(4)
+        self._title_label = QLabel("VinylSplit")
+        self._title_label.setObjectName("focusedTitle")
+        self._subtitle_label = QLabel("Load one recording, review boundaries, refine edits, and export from this workspace.")
+        self._subtitle_label.setWordWrap(True)
+        text_header.addWidget(self._title_label)
+        text_header.addWidget(self._subtitle_label)
 
-        action_row = QHBoxLayout()
+        self._artwork_label = QLabel("No artwork")
+        self._artwork_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._artwork_label.setObjectName("ArtworkPlaceholder")
+        self._artwork_label.setFixedSize(112, 112)
+
+        header_row.addLayout(text_header, stretch=1)
+        header_row.addWidget(self._artwork_label)
+        root.addLayout(header_row)
+
+        self._action_card = QFrame()
+        self._action_card.setObjectName("Card")
+        action_row = QHBoxLayout(self._action_card)
+        action_row.setContentsMargins(10, 10, 10, 10)
+        action_row.setSpacing(8)
         self._select_button = QPushButton("Select Recording")
         self._archive_button = QPushButton("Archive Now")
         self._review_button = QPushButton("Open Review")
@@ -131,24 +152,16 @@ class FocusedWorkspace(QWidget):
         ):
             action_row.addWidget(button)
 
-        root.addLayout(action_row)
+        root.addWidget(self._action_card)
 
-        self._progress_card = QFrame()
-        self._progress_card.setObjectName("focusedProgressCard")
-        progress_layout = QVBoxLayout(self._progress_card)
-        progress_layout.setContentsMargins(16, 16, 16, 16)
         self._status_label = QLabel("Waiting for a recording.")
+        self._status_label.setObjectName("StatusBarText")
         self._status_label.setWordWrap(True)
-        self._progress_bar = QProgressBar()
-        self._progress_bar.setRange(0, 100)
-        self._progress_bar.setValue(0)
-        progress_layout.addWidget(self._status_label)
-        progress_layout.addWidget(self._progress_bar)
-        root.addWidget(self._progress_card)
+        root.addWidget(self._status_label)
 
-        options_card = QFrame()
-        options_card.setObjectName("focusedOptionsCard")
-        options_layout = QGridLayout(options_card)
+        self._options_card = QFrame()
+        self._options_card.setObjectName("focusedOptionsCard")
+        options_layout = QGridLayout(self._options_card)
         options_layout.setContentsMargins(16, 16, 16, 16)
         options_layout.addWidget(self._auto_analyze_check, 0, 0)
         options_layout.addWidget(self._auto_review_check, 1, 0)
@@ -156,43 +169,27 @@ class FocusedWorkspace(QWidget):
         options_layout.addWidget(self._auto_artwork_check, 1, 1)
         options_layout.addWidget(QLabel("Review threshold"), 2, 0)
         options_layout.addWidget(self._review_threshold_combo, 2, 1)
-        root.addWidget(options_card)
-
-        artwork_card = QFrame()
-        artwork_card.setObjectName("focusedArtworkCard")
-        artwork_layout = QVBoxLayout(artwork_card)
-        artwork_layout.setContentsMargins(12, 12, 12, 12)
-        artwork_layout.setSpacing(8)
-        artwork_title = QLabel("Artwork")
-        artwork_title.setObjectName("StatusBarText")
-        self._artwork_label = QLabel("No artwork")
-        self._artwork_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._artwork_label.setMinimumHeight(140)
-        self._artwork_label.setObjectName("ArtworkPlaceholder")
-        artwork_layout.addWidget(artwork_title)
-        artwork_layout.addWidget(self._artwork_label)
-        root.addWidget(artwork_card)
+        root.addWidget(self._options_card)
 
         self._summary_label = QLabel("No album loaded.")
         self._summary_label.setWordWrap(True)
         root.addWidget(self._summary_label)
 
-        self._review_editor_card = QFrame()
-        self._review_editor_card.setObjectName("Card")
+        self._review_editor_card = QWidget()
         self._review_editor_layout = QVBoxLayout(self._review_editor_card)
-        self._review_editor_layout.setContentsMargins(12, 12, 12, 12)
+        self._review_editor_layout.setContentsMargins(0, 0, 0, 0)
         self._review_editor_layout.setSpacing(8)
         self._review_editor_placeholder = QLabel(
             "Boundary editor will appear here after analysis completes."
         )
         self._review_editor_placeholder.setObjectName("StatusBarText")
+        self._review_editor_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._review_editor_placeholder.setWordWrap(True)
         self._review_editor_layout.addWidget(self._review_editor_placeholder)
-        root.addWidget(self._review_editor_card, stretch=2)
+        root.addWidget(self._review_editor_card, stretch=7)
 
-        root.addStretch(1)
-
-        self._progress_card.hide()
+        self._status_label.hide()
+        self._apply_layout_mode()
 
     def apply_state(self, state: WorkspaceViewState) -> None:
         self._state = state
@@ -220,6 +217,63 @@ class FocusedWorkspace(QWidget):
         self._on_file_selected(selection.recording_path)
         if self._analyze_thread is None:
             self._begin_automatic_archive()
+
+    def enable_top_menu_mode(self, enabled: bool) -> None:
+        self._menu_mode_enabled = enabled
+        self._apply_layout_mode()
+
+    # File menu actions
+    def menu_select_recording(self) -> None:
+        self._choose_recording()
+
+    def menu_archive_now(self) -> None:
+        self._begin_automatic_archive()
+
+    def menu_open_review(self) -> None:
+        self._open_review_dialog()
+
+    def menu_split(self) -> None:
+        self._start_export()
+
+    def menu_open_output_folder(self) -> None:
+        self._open_output_folder()
+
+    def menu_archive_another_album(self) -> None:
+        self._reset_for_next_album()
+
+    # Edit menu actions
+    def menu_undo(self) -> None:
+        if self._embedded_review_editor is not None:
+            self._embedded_review_editor.undo_last_edit()
+
+    def menu_redo(self) -> None:
+        if self._embedded_review_editor is not None:
+            self._embedded_review_editor.redo_last_edit()
+
+    # Settings menu bindings
+    def auto_analyze_enabled(self) -> bool:
+        return self._auto_analyze_check.isChecked()
+
+    def set_auto_analyze_enabled(self, enabled: bool) -> None:
+        self._auto_analyze_check.setChecked(enabled)
+
+    def auto_review_enabled(self) -> bool:
+        return self._auto_review_check.isChecked()
+
+    def set_auto_review_enabled(self, enabled: bool) -> None:
+        self._auto_review_check.setChecked(enabled)
+
+    def auto_split_enabled(self) -> bool:
+        return self._auto_split_check.isChecked()
+
+    def set_auto_split_enabled(self, enabled: bool) -> None:
+        self._auto_split_check.setChecked(enabled)
+
+    def auto_artwork_enabled(self) -> bool:
+        return self._auto_artwork_check.isChecked()
+
+    def set_auto_artwork_enabled(self, enabled: bool) -> None:
+        self._auto_artwork_check.setChecked(enabled)
 
     def _sync_state_from_model(self) -> None:
         recording_path = getattr(self._state, "recording_path", None)
@@ -263,8 +317,8 @@ class FocusedWorkspace(QWidget):
         self._summary_label.setText(" | ".join(part for part in summary_parts if part))
 
         self._status_label.setText(f"{status_message} [{progress_label}]")
-        self._progress_bar.setValue(int(progress_value))
         self._set_progress_visible(bool(recording_path) and analysis_state not in {"", "Idle"})
+        self._apply_layout_mode()
         self._sync_action_buttons()
 
     def _choose_recording(self) -> None:
@@ -534,8 +588,10 @@ class FocusedWorkspace(QWidget):
         dialog.show()
 
         self._embedded_review_editor = dialog
+        self._editing_layout_mode = True
         self._set_state_field("review_state", "In progress")
         self._set_state_field("status_message", "Review editor ready. Adjust boundaries and export when ready.")
+        self._apply_layout_mode()
         self._sync_action_buttons()
         self._emit_state_change()
 
@@ -552,12 +608,43 @@ class FocusedWorkspace(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
+        self._editing_layout_mode = False
+        self._apply_layout_mode()
+
     def _on_embedded_review_accepted(self) -> None:
+        self._editing_layout_mode = True
+        self._apply_layout_mode()
+        QTimer.singleShot(0, self._restore_embedded_editor_visibility)
+
         self._set_state_field("review_state", "Completed")
         self._ui_step = FocusedStep.READY_TO_SPLIT
-        self._set_state_field("status_message", "Review accepted. Ready to export.")
+        self._set_state_field("status_message", "Review accepted. Exporting and opening output folder...")
         self._sync_action_buttons()
         self._emit_state_change()
+
+        self._open_output_after_export = True
+        self._start_export()
+        if self._export_thread is None:
+            self._open_output_after_export = False
+            self._set_state_field("status_message", "Review accepted. Choose output folder to export.")
+            self._emit_state_change()
+
+    def _restore_embedded_editor_visibility(self) -> None:
+        if self._embedded_review_editor is None:
+            return
+
+        self._embedded_review_editor.setParent(self._review_editor_card)
+        self._embedded_review_editor.setWindowFlags(Qt.WindowType.Widget)
+        self._embedded_review_editor.show()
+        self._embedded_review_editor.raise_()
+
+    def _set_embedded_editor_exporting(self, exporting: bool) -> None:
+        if self._embedded_review_editor is None:
+            return
+
+        setter = getattr(self._embedded_review_editor, "set_exporting_active", None)
+        if callable(setter):
+            setter(exporting)
 
     def _on_embedded_review_rejected(self) -> None:
         self._set_state_field("review_state", "Requested")
@@ -581,12 +668,28 @@ class FocusedWorkspace(QWidget):
 
         if session_dto is not None:
             boundaries = tuple(self._review_session.boundaries) if self._review_session is not None else None
-            return ReviewDialog(session_dto=session_dto, boundaries=boundaries, parent=self)
+            dialog = ReviewDialog(session_dto=session_dto, boundaries=boundaries, parent=self)
+            self._apply_artwork_to_review_dialog(dialog)
+            return dialog
 
         if self._review_session is not None:
-            return ReviewDialog(boundaries=tuple(self._review_session.boundaries), parent=self)
+            dialog = ReviewDialog(boundaries=tuple(self._review_session.boundaries), parent=self)
+            self._apply_artwork_to_review_dialog(dialog)
+            return dialog
 
         return None
+
+    def _apply_artwork_to_review_dialog(self, dialog: QWidget) -> None:
+        set_album_artwork = getattr(dialog, "set_album_artwork", None)
+        if not callable(set_album_artwork):
+            return
+
+        pixmap = self._artwork_label.pixmap()
+        if pixmap is None or pixmap.isNull():
+            set_album_artwork(None)
+            return
+
+        set_album_artwork(QPixmap(pixmap))
 
     def _start_export(self) -> None:
         if self._export_thread is not None:
@@ -615,6 +718,8 @@ class FocusedWorkspace(QWidget):
             recording_path,
             output_directory,
             self._auto_artwork_check.isChecked(),
+            self._export_artist_hint(),
+            self._export_album_hint(),
             getattr(self._review_session, "session", self._review_session),
             self._preferred_output_format(),
         )
@@ -626,6 +731,7 @@ class FocusedWorkspace(QWidget):
         self._export_worker.completed.connect(self._export_thread.quit)
         self._export_worker.failed.connect(self._export_thread.quit)
         self._export_thread.finished.connect(self._cleanup_export_worker)
+        self._set_embedded_editor_exporting(True)
         self._export_thread.start()
 
     @Slot(int, int, str)
@@ -638,6 +744,7 @@ class FocusedWorkspace(QWidget):
 
     @Slot(object)
     def _on_export_complete(self, payload: object) -> None:
+        self._set_embedded_editor_exporting(False)
         data = payload if isinstance(payload, dict) else {}
         output_directory = data.get("output_directory") or self._last_output_directory
         exported_tracks_raw = data.get("exported_tracks")
@@ -663,8 +770,14 @@ class FocusedWorkspace(QWidget):
             self._set_state_field("recording_info", f"Archive complete: {exported_tracks_count} tracks saved.")
         self._sync_action_buttons()
 
+        if self._open_output_after_export:
+            self._open_output_after_export = False
+            self._open_output_folder()
+
     @Slot(str)
     def _on_export_failed(self, message: str) -> None:
+        self._set_embedded_editor_exporting(False)
+        self._open_output_after_export = False
         self._set_state_field("status_message", f"Archive failed: {message}")
         self._set_state_field("progress_label", "Archive failed")
         self._set_state_field("progress_value", 0)
@@ -677,6 +790,7 @@ class FocusedWorkspace(QWidget):
             self._export_worker.deleteLater()
         self._export_worker = None
         self._export_thread = None
+        self._set_embedded_editor_exporting(False)
         self._sync_action_buttons()
 
     def _open_output_folder(self) -> None:
@@ -692,6 +806,8 @@ class FocusedWorkspace(QWidget):
         QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
 
     def _reset_for_next_album(self) -> None:
+        self._open_output_after_export = False
+        self._set_embedded_editor_exporting(False)
         self._clear_artwork_preview()
         self._clear_embedded_review_editor()
         self._set_state_field("recording_path", None)
@@ -708,6 +824,8 @@ class FocusedWorkspace(QWidget):
         self._analysis_result = None
         self._ui_step = FocusedStep.WELCOME
         self._set_progress_visible(False)
+        self._editing_layout_mode = False
+        self._apply_layout_mode()
         self._emit_state_change()
 
     def _sync_action_buttons(self) -> None:
@@ -722,15 +840,41 @@ class FocusedWorkspace(QWidget):
         self._archive_again_button.setEnabled(self._ui_step is FocusedStep.ARCHIVE_COMPLETE)
 
     def _set_progress_visible(self, visible: bool) -> None:
-        self._progress_card.setVisible(visible)
+        self._progress_visible = visible
+        editing_mode = self._editing_layout_mode and self._embedded_review_editor is not None
+        self._status_label.setVisible(visible and not editing_mode)
+
+    def _apply_layout_mode(self) -> None:
+        has_editor = self._embedded_review_editor is not None
+        editing_mode = self._editing_layout_mode and has_editor
+        compact_mode = self._menu_mode_enabled
+
+        show_header = (not compact_mode) and (not editing_mode)
+        self._title_label.setVisible(show_header)
+        self._subtitle_label.setVisible(show_header)
+        self._artwork_label.setVisible(show_header)
+        self._status_label.setVisible(show_header and self._progress_visible)
+        self._summary_label.setVisible(show_header)
+        self._action_card.setVisible(not self._menu_mode_enabled)
+        self._options_card.setVisible((not editing_mode) and (not self._menu_mode_enabled))
+        self._review_editor_placeholder.setVisible(not has_editor)
+
+        if editing_mode:
+            self._subtitle_label.setText(
+                "Boundary editor active. Refine boundaries, verify tracks, then export from this screen."
+            )
+        else:
+            self._subtitle_label.setText(
+                "Load one recording, review boundaries, refine edits, and export from this workspace."
+            )
 
     def _update_artwork_preview(self, artwork: bytes) -> None:
         pixmap = QPixmap()
         if pixmap.loadFromData(artwork):
             self._artwork_label.setPixmap(
                 pixmap.scaled(
-                    180,
-                    180,
+                    112,
+                    112,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -763,6 +907,18 @@ class FocusedWorkspace(QWidget):
         if cleaned not in {"flac", "wav", "mp3"}:
             return "flac"
         return cleaned
+
+    def _export_artist_hint(self) -> str | None:
+        artist = str(getattr(self._state, "album_artist", "") or "").strip()
+        if not artist or artist == "Album information couldn't be identified":
+            return None
+        return artist
+
+    def _export_album_hint(self) -> str | None:
+        album = str(getattr(self._state, "album_title", "") or "").strip()
+        if not album:
+            return None
+        return album
 
     def _set_state_field(self, name: str, value: Any) -> None:
         try:
@@ -873,6 +1029,8 @@ class _FocusedExportWorker(QObject):
         recording_path: str,
         output_directory: str,
         fetch_artwork: bool,
+        artist: str | None,
+        album: str | None,
         review_session: Any | None,
         output_format: str,
     ) -> None:
@@ -881,6 +1039,8 @@ class _FocusedExportWorker(QObject):
         self._recording_path = recording_path
         self._output_directory = output_directory
         self._fetch_artwork = fetch_artwork
+        self._artist = artist
+        self._album = album
         self._review_session = review_session
         self._output_format = output_format
 
@@ -898,6 +1058,8 @@ class _FocusedExportWorker(QObject):
                 self._app_context.export_controller.export(
                     filename=self._recording_path,
                     output_directory=self._output_directory,
+                    artist=self._artist,
+                    album=self._album,
                     review_session=self._review_session,
                     progress_callback=on_progress,
                     output_format=self._output_format,

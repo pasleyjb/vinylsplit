@@ -58,18 +58,6 @@ class ReviewWaveformView(QWidget):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        header = QLabel(f"Track {boundary.track_number} boundary @ {boundary.selected_timestamp:.2f}s")
-        header.setObjectName("SectionTitle")
-
-        confidence_text = "Confidence: --"
-        if boundary.confidence is not None:
-            confidence_text = (
-                f"Confidence: {boundary.confidence.overall * 100:.0f}% "
-                f"({boundary.confidence.display_breakdown})"
-            )
-        confidence = QLabel(confidence_text)
-        confidence.setObjectName("StatusBarText")
-
         self._canvas = _WaveformCanvas(
             boundary=boundary,
             duration=self._duration,
@@ -126,8 +114,6 @@ class ReviewWaveformView(QWidget):
 
         self._apply_zoom(center_seconds=boundary.selected_timestamp)
 
-        layout.addWidget(header)
-        layout.addWidget(confidence)
         layout.addLayout(zoom_row)
         layout.addWidget(self._scroll_area, stretch=1)
 
