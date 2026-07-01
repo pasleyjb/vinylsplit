@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -68,9 +69,14 @@ class ReviewDialog(QDialog):
         self._last_player_seconds: float = 0.0
         self._programmatic_seek = False
         self._last_auto_snap_boundary: int | None = None
-        self._loop_padding_seconds = 1.5
+        self._boundary_pre_roll_seconds = 2.0
+        self._boundary_post_roll_seconds = 5.0
+        self._loop_window_seconds = 4.0
+        self._loop_center_seconds: float | None = None
         self._boundary_play_end: float | None = None
         self._local_analyzer: LocalAnalyzer | None = None
+        self._refine_thread: QThread | None = None
+        self._refine_worker: _BoundaryRefineWorker | None = None
         self._undo_stack: list[dict[str, object]] = []
         self._redo_stack: list[dict[str, object]] = []
         self._shortcuts: list[QShortcut] = []
@@ -106,7 +112,7 @@ class ReviewDialog(QDialog):
         root.addWidget(title)
         root.addWidget(intro)
         root.addWidget(top_split, stretch=4)
-        root.addWidget(bottom_panel, stretch=2)
+        root.addWidget(bottom_panel, stretch=3)
         root.addLayout(toolbar)
 
         self._populate_tracks_table()
@@ -125,7 +131,7 @@ class ReviewDialog(QDialog):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        header = QLabel("Detected Tracks")
+        header = QLabel("TRACKS")
         header.setObjectName("SectionTitle")
 
         self._tracks_table = QTableWidget()
@@ -140,7 +146,15 @@ class ReviewDialog(QDialog):
         self._tracks_table.setAlternatingRowColors(True)
         self._tracks_table.verticalHeader().setVisible(False)
         self._tracks_table.verticalHeader().setDefaultSectionSize(38)
-        self._tracks_table.horizontalHeader().setStretchLastSection(True)
+        header = self._tracks_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
+        self._tracks_table.setColumnWidth(0, 72)
+        self._tracks_table.setColumnWidth(1, 280)
+        self._tracks_table.setColumnWidth(2, 110)
+        self._tracks_table.setColumnWidth(3, 110)
+        self._tracks_table.setColumnWidth(4, 110)
+        self._tracks_table.setColumnWidth(5, 120)
 
         layout.addWidget(header)
         layout.addWidget(self._tracks_table, stretch=1)
@@ -287,10 +301,11 @@ class ReviewDialog(QDialog):
         self._play_boundary_button.setMinimumHeight(38)
         self._play_boundary_button.clicked.connect(self._play_from_selected_boundary)
 
-        self._loop_button = QPushButton("Loop Boundary")
+        self._loop_button = QPushButton("LOOP")
         self._loop_button.setObjectName("SecondaryButton")
         self._loop_button.setMinimumHeight(38)
         self._loop_button.setCheckable(True)
+        self._loop_button.toggled.connect(self._on_loop_toggled)
 
         self._playback_position_label = QLabel("Position: 00:00.00")
         self._playback_position_label.setObjectName("StatusBarText")
@@ -459,6 +474,8 @@ class ReviewDialog(QDialog):
         self._set_boundary_start(row, timestamp)
 
     def _on_waveform_seek_requested(self, timestamp: float) -> None:
+        if self._loop_button.isChecked():
+            self._loop_center_seconds = max(0.0, timestamp)
         self._seek_playback(timestamp)
 
     def _on_waveform_add_boundary_requested(self, timestamp: float) -> None:
@@ -473,8 +490,9 @@ class ReviewDialog(QDialog):
         while insert_row < len(self._editable_starts) and self._editable_starts[insert_row] < timestamp:
             insert_row += 1
 
-        lower = 0.0 if insert_row == 0 else self._editable_starts[insert_row - 1] + 0.01
-        upper = None if insert_row >= len(self._editable_starts) else self._editable_starts[insert_row] - 0.01
+        minimum_gap = self._minimum_boundary_gap_seconds()
+        lower = 0.0 if insert_row == 0 else self._editable_starts[insert_row - 1] + minimum_gap
+        upper = None if insert_row >= len(self._editable_starts) else self._editable_starts[insert_row] - minimum_gap
         clamped = max(lower, timestamp)
         if upper is not None:
             clamped = min(clamped, upper)
@@ -516,13 +534,29 @@ class ReviewDialog(QDialog):
         if isinstance(self._boundaries[row], ReviewBoundaryDTO):
             self._selection_label.setText("Current selection: anchor/refine unavailable for DTO-backed review")
             return
+        if self._refine_thread is not None:
+            self._selection_label.setText("Current selection: refinement already running")
+            return
 
         self._push_undo_snapshot()
         self._redo_stack.clear()
-        self._set_boundary_locked(row)
-        improved = self._refine_boundaries_from_anchors()
-        self._refresh_after_boundary_edit(row)
-        self._selection_label.setText(f"Current selection: anchor applied, refined {improved} boundaries")
+        self._set_refine_busy(True)
+
+        self._refine_thread = QThread(self)
+        self._refine_worker = _BoundaryRefineWorker(
+            source_file=self._playback_source or "",
+            boundaries=copy.deepcopy(self._boundaries),
+            anchor_row=row,
+            duration_seconds=self._estimate_session_duration(),
+        )
+        self._refine_worker.moveToThread(self._refine_thread)
+        self._refine_thread.started.connect(self._refine_worker.run)
+        self._refine_worker.completed.connect(self._on_boundary_refine_complete)
+        self._refine_worker.failed.connect(self._on_boundary_refine_failed)
+        self._refine_worker.completed.connect(self._refine_thread.quit)
+        self._refine_worker.failed.connect(self._refine_thread.quit)
+        self._refine_thread.finished.connect(self._cleanup_refine_worker)
+        self._refine_thread.start()
 
     def _snapshot_state(self) -> dict[str, object]:
         return {
@@ -566,41 +600,54 @@ class ReviewDialog(QDialog):
         if hasattr(boundary, "state"):
             setattr(boundary, "state", BoundaryState.LOCKED)
 
-    def _refine_boundaries_from_anchors(self) -> int:
-        if not self._playback_source:
-            return 0
-        if any(isinstance(boundary, ReviewBoundaryDTO) for boundary in self._boundaries):
-            return 0
-
-        if self._local_analyzer is None:
-            self._local_analyzer = build_local_analyzer(self._playback_source)
-        if self._local_analyzer is None:
-            return 0
-
-        model_boundaries = [boundary for boundary in self._boundaries if isinstance(boundary, Boundary)]
-        if len(model_boundaries) != len(self._boundaries):
-            return 0
-
-        state = AdaptiveReviewState(
-            source_file=self._playback_source,
-            boundaries=model_boundaries,
-            track_titles=[self._boundary_title(boundary) for boundary in self._boundaries],
-        )
-
-        summary = self._local_analyzer.refine_boundaries(
-            state=state,
-            duration_seconds=self._estimate_session_duration(),
-            minimum_spacing_seconds=0.25,
-            debug=False,
-        )
-
-        self._editable_starts = [float(boundary.start_time) for boundary in self._boundaries]
-        return summary.boundaries_improved
-
     def _renumber_tracks(self) -> None:
         for index, boundary in enumerate(self._boundaries, start=1):
             if hasattr(boundary, "track_number"):
                 setattr(boundary, "track_number", index)
+
+    def _set_refine_busy(self, busy: bool) -> None:
+        self._tracks_table.setEnabled(not busy)
+        self._boundary_time_input.setEnabled(not busy)
+        for button in (self._play_button, self._pause_button, self._stop_button, self._play_boundary_button, self._loop_button):
+            button.setEnabled(not busy)
+        self._selection_label.setText("Current selection: refining boundary anchors..." if busy else self._selection_label.text())
+
+    @Slot(object)
+    def _on_boundary_refine_complete(self, payload: object) -> None:
+        data = payload if isinstance(payload, dict) else {}
+        boundaries = data.get("boundaries")
+        improved = int(data.get("improved", 0) or 0)
+        anchor_timestamp = float(data.get("anchor_timestamp", -1.0) or -1.0)
+
+        if isinstance(boundaries, list):
+            self._boundaries = boundaries
+            self._editable_starts = [float(boundary.start_time) for boundary in self._boundaries]
+            self._renumber_tracks()
+            self._populate_tracks_table()
+            selected_row = 0
+            if anchor_timestamp >= 0.0:
+                selected_row = min(
+                    range(len(self._boundaries)),
+                    key=lambda idx: abs(self._start_for_row(idx) - anchor_timestamp),
+                )
+            if 0 <= selected_row < self._tracks_table.rowCount():
+                self._tracks_table.selectRow(selected_row)
+            self._on_selection_changed()
+            self._selection_label.setText(f"Current selection: anchor applied, refined {improved} boundaries")
+
+        self._set_refine_busy(False)
+
+    @Slot(str)
+    def _on_boundary_refine_failed(self, message: str) -> None:
+        self._set_refine_busy(False)
+        self._selection_label.setText(f"Current selection: refinement failed - {message}")
+
+    @Slot()
+    def _cleanup_refine_worker(self) -> None:
+        if self._refine_worker is not None:
+            self._refine_worker.deleteLater()
+        self._refine_worker = None
+        self._refine_thread = None
 
     def _estimate_session_duration(self) -> float:
         if self._source_duration_seconds is not None and self._source_duration_seconds > 1.0:
@@ -639,8 +686,9 @@ class ReviewDialog(QDialog):
         previous = self._start_for_row(row - 1) if row > 0 else 0.0
         next_start = self._start_for_row(row + 1) if row + 1 < len(self._editable_starts) else None
 
-        lower_bound = max(0.0, previous + 0.01) if row > 0 else 0.0
-        upper_bound = (next_start - 0.01) if next_start is not None else None
+        minimum_gap = self._minimum_boundary_gap_seconds()
+        lower_bound = max(0.0, previous + minimum_gap) if row > 0 else 0.0
+        upper_bound = (next_start - minimum_gap) if next_start is not None else None
 
         clamped = max(lower_bound, value)
         if upper_bound is not None:
@@ -710,7 +758,8 @@ class ReviewDialog(QDialog):
         if self._player is not None:
             self._boundary_play_end = None
             if self._loop_button.isChecked():
-                loop_start, _ = self._selected_loop_window()
+                self._loop_center_seconds = self._current_playhead_seconds()
+                loop_start, _ = self._current_loop_window()
                 self._seek_playback(loop_start)
             self._player.play()
 
@@ -737,9 +786,9 @@ class ReviewDialog(QDialog):
         row = self._current_selected_row()
         if row is None:
             return
-        loop_start, loop_end = self._selected_loop_window()
-        self._boundary_play_end = loop_end
-        self._seek_playback(loop_start)
+        segment_start, segment_end = self._selected_boundary_window()
+        self._boundary_play_end = segment_end
+        self._seek_playback(segment_start)
         if self._player is not None:
             self._player.play()
 
@@ -765,15 +814,18 @@ class ReviewDialog(QDialog):
         if self._boundary_play_end is not None and self._player is not None:
             if seconds >= self._boundary_play_end and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 if self._loop_button.isChecked():
-                    loop_start, _ = self._selected_loop_window()
+                    if self._loop_center_seconds is None:
+                        self._loop_center_seconds = seconds
+                    loop_start, _ = self._current_loop_window()
                     self._seek_playback(loop_start)
                 else:
                     self._player.stop()
                     self._boundary_play_end = None
         elif self._loop_button.isChecked() and self._player is not None:
-            _, loop_end = self._selected_loop_window()
+            if self._loop_center_seconds is None:
+                self._loop_center_seconds = seconds
+            loop_start, loop_end = self._current_loop_window()
             if seconds >= loop_end and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-                loop_start, _ = self._selected_loop_window()
                 self._seek_playback(loop_start)
 
         self._last_player_seconds = seconds
@@ -800,17 +852,40 @@ class ReviewDialog(QDialog):
         if 0 <= crossed_index < self._tracks_table.rowCount():
             self._tracks_table.selectRow(crossed_index)
 
-    def _selected_loop_window(self) -> tuple[float, float]:
+    def _selected_boundary_window(self) -> tuple[float, float]:
         row = self._current_selected_row()
         if row is None:
             return 0.0, max(2.0, self._estimate_session_duration())
 
         center = self._start_for_row(row)
-        start = max(0.0, center - self._loop_padding_seconds)
-        end = center + self._loop_padding_seconds
+        start = max(0.0, center - self._boundary_pre_roll_seconds)
+        end = center + self._boundary_post_roll_seconds
         session_end = self._estimate_session_duration()
         end = min(max(end, start + 0.25), session_end)
         return start, end
+
+    def _current_playhead_seconds(self) -> float:
+        if self._player is None:
+            return self._last_player_seconds
+        return max(0.0, self._player.position() / 1000.0)
+
+    def _current_loop_window(self) -> tuple[float, float]:
+        center = self._loop_center_seconds if self._loop_center_seconds is not None else self._current_playhead_seconds()
+        half_window = self._loop_window_seconds / 2.0
+        session_end = self._estimate_session_duration()
+        start = max(0.0, center - half_window)
+        end = min(session_end, start + self._loop_window_seconds)
+        if end - start < self._loop_window_seconds:
+            start = max(0.0, end - self._loop_window_seconds)
+        if end <= start:
+            end = min(session_end, start + 0.25)
+        return start, end
+
+    def _on_loop_toggled(self, checked: bool) -> None:
+        if checked:
+            self._loop_center_seconds = self._current_playhead_seconds()
+            return
+        self._loop_center_seconds = None
 
     def _nudge_selected_boundary(self, delta_seconds: float) -> None:
         row = self._current_selected_row()
@@ -885,6 +960,11 @@ class ReviewDialog(QDialog):
         if 0 <= row < len(self._editable_starts):
             return float(self._editable_starts[row])
         return 0.0
+
+    def _minimum_boundary_gap_seconds(self) -> float:
+        if self._current_waveform is not None:
+            return self._current_waveform.minimum_boundary_gap_seconds()
+        return 0.05
 
     @staticmethod
     def _boundary_track_number(boundary: object, row: int) -> int:
@@ -1001,6 +1081,59 @@ def _format_duration(seconds: float | None) -> str:
     return f"{minutes:02d}:{rem:02d}.{centis:02d}"
 
 
+class _BoundaryRefineWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, source_file: str, boundaries: list[Boundary], anchor_row: int, duration_seconds: float) -> None:
+        super().__init__()
+        self._source_file = source_file
+        self._boundaries = boundaries
+        self._anchor_row = anchor_row
+        self._duration_seconds = duration_seconds
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if not self._source_file:
+                raise ValueError("Missing source audio for refinement.")
+
+            analyzer = build_local_analyzer(self._source_file)
+            if analyzer is None:
+                raise ValueError("Unable to load source audio for refinement.")
+
+            if not (0 <= self._anchor_row < len(self._boundaries)):
+                raise ValueError("Anchor boundary is out of range.")
+
+            anchor_boundary = self._boundaries[self._anchor_row]
+            anchor_timestamp = float(anchor_boundary.start_time)
+            anchor_boundary.state = BoundaryState.LOCKED
+
+            state = AdaptiveReviewState(
+                source_file=self._source_file,
+                boundaries=self._boundaries,
+                track_titles=[],
+            )
+
+            summary = analyzer.refine_boundaries(
+                state=state,
+                duration_seconds=self._duration_seconds,
+                minimum_spacing_seconds=0.25,
+                debug=False,
+            )
+
+            state._normalize()
+            self.completed.emit(
+                {
+                    "boundaries": copy.deepcopy(state.boundaries),
+                    "improved": summary.boundaries_improved,
+                    "anchor_timestamp": anchor_timestamp,
+                }
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 def _parse_timestamp_text(raw: str) -> float | None:
     text = raw.strip()
     if not text:
@@ -1023,8 +1156,11 @@ def _parse_timestamp_text(raw: str) -> float | None:
         return None
 
 
-def _load_waveform_envelope(source: str | None, sample_points: int = 1400) -> tuple[list[float] | None, float | None]:
-    """Build a compact waveform envelope from the source audio file."""
+def _load_waveform_envelope(
+    source: str | None,
+    sample_points: int = 1400,
+) -> tuple[list[tuple[float, float]] | None, float | None]:
+    """Build a compact stereo waveform envelope from the source audio file."""
     if not source:
         return None, None
 
@@ -1041,15 +1177,17 @@ def _load_waveform_envelope(source: str | None, sample_points: int = 1400) -> tu
 
             duration_seconds = total_frames / sample_rate
             block_size = max(1, int(total_frames / max(1, sample_points)))
-            peaks: list[float] = []
+            peaks: list[tuple[float, float]] = []
 
             audio_file.seek(0)
             for block in audio_file.blocks(blocksize=block_size, dtype="float32", always_2d=True):
                 if block.size == 0:
                     continue
-                channel = block[:, 0]
-                peak = float(np.max(np.abs(channel)))
-                peaks.append(max(0.0, min(1.0, peak)))
+                left = block[:, 0]
+                right = block[:, 1] if block.shape[1] > 1 else left
+                left_peak = max(0.0, min(1.0, float(np.max(np.abs(left)))))
+                right_peak = max(0.0, min(1.0, float(np.max(np.abs(right)))))
+                peaks.append((left_peak, right_peak))
                 if len(peaks) >= sample_points:
                     break
 
@@ -1061,6 +1199,6 @@ def _load_waveform_envelope(source: str | None, sample_points: int = 1400) -> tu
             if scale > 1e-6:
                 values = np.clip(values / scale, 0.0, 1.0)
 
-            return values.tolist(), duration_seconds
+            return [tuple(map(float, pair)) for pair in values.tolist()], duration_seconds
     except Exception:
         return None, None

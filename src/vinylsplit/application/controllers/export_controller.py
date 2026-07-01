@@ -18,6 +18,7 @@ class ExportController:
         self,
         filename: str,
         output_directory: str,
+        output_format: str = "flac",
         artist: str | None = None,
         album: str | None = None,
         review_session: AdaptiveReviewState | None = None,
@@ -28,6 +29,7 @@ class ExportController:
         return await self._export_service.export(
             filename=filename,
             output_directory=output_directory,
+            output_format=output_format,
             artist=artist,
             album=album,
             review_session=review_session,

@@ -20,6 +20,7 @@ class ExportService(ExportServiceInterface):
         self,
         filename: str,
         output_directory: str,
+        output_format: str = "flac",
         artist: str | None = None,
         album: str | None = None,
         review_session: AdaptiveReviewState | None = None,
@@ -53,12 +54,20 @@ class ExportService(ExportServiceInterface):
         results = await self._pipeline.process(
             filename=filename,
             output_directory=output_directory,
+            output_format=output_format,
             artist=artist,
             album=album,
             review_session=review_session,
             progress_callback=_forward_progress,
         )
-        exported_files = list(Path(output_directory).rglob("*.flac"))
+        extension_by_format = {
+            "flac": ".flac",
+            "wav": ".wav",
+            "mp3": ".mp3",
+        }
+        normalized = output_format.strip().lower()
+        extension = extension_by_format.get(normalized, ".flac")
+        exported_files = list(Path(output_directory).rglob(f"*{extension}"))
         exported_track_count = len(exported_files)
         return ExportResult(
             source_file=filename,

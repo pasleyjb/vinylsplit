@@ -55,6 +55,7 @@ class ExportServiceInterface(ABC):
         self,
         filename: str,
         output_directory: str,
+        output_format: str = "flac",
         artist: str | None = None,
         album: str | None = None,
         review_session: AdaptiveReviewState | None = None,

@@ -20,6 +20,9 @@ from vinylsplit.application.dto.review import ReviewBoundaryDTO
 class ReviewWaveformView(QWidget):
     """Waveform-like timeline display backed by review boundary candidates."""
 
+    TAB_HALF_WIDTH = 18.0
+    TAB_HEIGHT = 16.0
+
     candidate_selected = Signal(float)
     boundary_dragged = Signal(float)
     boundary_tab_selected = Signal(int)
@@ -67,12 +70,6 @@ class ReviewWaveformView(QWidget):
         confidence = QLabel(confidence_text)
         confidence.setObjectName("StatusBarText")
 
-        candidates_label = QLabel("Candidates")
-        candidates_label.setObjectName("StatusBarText")
-        candidates_detail = QLabel(self._build_candidates_text())
-        candidates_detail.setObjectName("StatusBarText")
-        candidates_detail.setWordWrap(True)
-
         self._canvas = _WaveformCanvas(
             boundary=boundary,
             duration=self._duration,
@@ -96,9 +93,9 @@ class ReviewWaveformView(QWidget):
         zoom_label = QLabel("Zoom")
         zoom_label.setObjectName("StatusBarText")
 
-        self._zoom_out_button = QPushButton("-")
+        self._zoom_out_button = QPushButton("🔍−")
         self._zoom_out_button.setObjectName("SecondaryButton")
-        self._zoom_out_button.setFixedWidth(28)
+        self._zoom_out_button.setFixedSize(26, 20)
         self._zoom_out_button.clicked.connect(self._zoom_out)
 
         self._zoom_slider = QSlider(Qt.Orientation.Horizontal)
@@ -106,9 +103,9 @@ class ReviewWaveformView(QWidget):
         self._zoom_slider.setValue(int(round(self._zoom_factor)))
         self._zoom_slider.valueChanged.connect(self._on_zoom_changed)
 
-        self._zoom_in_button = QPushButton("+")
+        self._zoom_in_button = QPushButton("🔍+")
         self._zoom_in_button.setObjectName("SecondaryButton")
-        self._zoom_in_button.setFixedWidth(28)
+        self._zoom_in_button.setFixedSize(26, 20)
         self._zoom_in_button.clicked.connect(self._zoom_in)
 
         self._zoom_value_label = QLabel("")
@@ -132,9 +129,7 @@ class ReviewWaveformView(QWidget):
         layout.addWidget(header)
         layout.addWidget(confidence)
         layout.addLayout(zoom_row)
-        layout.addWidget(self._scroll_area, stretch=2)
-        layout.addWidget(candidates_label)
-        layout.addWidget(candidates_detail, stretch=1)
+        layout.addWidget(self._scroll_area, stretch=1)
 
         QTimer.singleShot(0, lambda: self._ensure_visible(boundary.selected_timestamp, center=True))
 
@@ -142,15 +137,8 @@ class ReviewWaveformView(QWidget):
         self._canvas.set_playhead(seconds)
         self._ensure_visible(seconds)
 
-    def _build_candidates_text(self) -> str:
-        if not self._boundary.candidates:
-            return "No alternative candidates detected by backend."
-
-        lines = []
-        for candidate in self._boundary.candidates[:5]:
-            marker = "*" if candidate.rank == 0 else "-"
-            lines.append(f"{marker} {candidate.display_label} ({candidate.reason})")
-        return "\n".join(lines)
+    def minimum_boundary_gap_seconds(self) -> float:
+        return self._canvas.minimum_boundary_gap_seconds()
 
     def _on_zoom_changed(self, value: int) -> None:
         self._zoom_factor = float(value)
@@ -221,6 +209,10 @@ class ReviewWaveformView(QWidget):
 class _WaveformCanvas(QFrame):
     """Simple painted timeline with candidate markers."""
 
+    TAB_HALF_WIDTH = 18.0
+    TAB_HEIGHT = 16.0
+    TAB_GAP_PIXELS = 6.0
+
     candidate_clicked = Signal(float)
     boundary_dragged = Signal(float)
     boundary_tab_selected = Signal(int)
@@ -248,13 +240,15 @@ class _WaveformCanvas(QFrame):
         self._duration = max(1.0, duration)
         self._selected_timestamp = boundary.selected_timestamp
         self._boundary_times = list(boundary_times)
-        self._waveform_envelope = list(waveform_envelope or [])
+        self._waveform_left: list[float] = []
+        self._waveform_right: list[float] = []
+        self._set_waveform_envelope(waveform_envelope)
         self._selected_index = max(0, min(selected_index, len(self._boundary_times) - 1))
-        self._tab_hitboxes: list[QRectF] = []
+        self._tab_hitboxes: list[tuple[int, QRectF]] = []
         self._playhead_timestamp: float | None = None
         self._dragging_boundary = False
         self._dragging_tab_index: int | None = None
-        self.setMinimumHeight(180)
+        self.setMinimumHeight(380)
         self.setStyleSheet("background-color: #1f1f1f; border: 1px solid #3f3f3f;")
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -286,7 +280,7 @@ class _WaveformCanvas(QFrame):
 
         clicked_time = ((x_pos - margin) / max(1.0, canvas_width)) * self._duration
 
-        for index, tab_rect in enumerate(self._tab_hitboxes):
+        for index, tab_rect in self._tab_hitboxes:
             if tab_rect.contains(QPointF(x_pos, event.position().y())):
                 self._selected_index = index
                 self._selected_timestamp = self._boundary_times[index]
@@ -370,7 +364,7 @@ class _WaveformCanvas(QFrame):
 
         menu = QMenu(self)
         tab_index = None
-        for index, tab_rect in enumerate(self._tab_hitboxes):
+        for index, tab_rect in self._tab_hitboxes:
             if tab_rect.contains(QPointF(x_pos, y_pos)):
                 tab_index = index
                 break
@@ -400,9 +394,16 @@ class _WaveformCanvas(QFrame):
         return min(max(value, 0.0), self._duration)
 
     def _clamp_tab_timestamp(self, index: int, value: float) -> float:
-        lower = 0.0 if index == 0 else self._boundary_times[index - 1] + 0.01
-        upper = self._duration if index + 1 >= len(self._boundary_times) else self._boundary_times[index + 1] - 0.01
+        minimum_gap = self.minimum_boundary_gap_seconds()
+        lower = 0.0 if index == 0 else self._boundary_times[index - 1] + minimum_gap
+        upper = self._duration if index + 1 >= len(self._boundary_times) else self._boundary_times[index + 1] - minimum_gap
         return min(max(value, lower), upper)
+
+    def minimum_boundary_gap_seconds(self) -> float:
+        canvas_width = max(1.0, self.width() - (2 * self.MARGIN))
+        seconds_per_pixel = self._duration / canvas_width
+        required_pixels = (self.TAB_HALF_WIDTH * 2.0) + self.TAB_GAP_PIXELS
+        return max(0.05, required_pixels * seconds_per_pixel)
 
     def set_playhead(self, seconds: float) -> None:
         self._playhead_timestamp = self._clamp_timestamp(seconds)
@@ -430,24 +431,61 @@ class _WaveformCanvas(QFrame):
             tick += step
 
     def _draw_waveform(self, painter: QPainter, width: int, height: int, margin: int) -> None:
-        if not self._waveform_envelope:
+        if not self._waveform_left and not self._waveform_right:
             return
 
-        top = 20
-        bottom = height - 20
+        top = 24
+        bottom = height - 24
         center = (top + bottom) / 2.0
-        max_half_height = max(8.0, (bottom - top) * 0.44)
+        max_half_height = max(30.0, (bottom - top) * 0.43)
         canvas_width = width - 2 * margin
-        sample_count = len(self._waveform_envelope)
+        sample_count = max(len(self._waveform_left), len(self._waveform_right))
         if canvas_width <= 0 or sample_count == 0:
             return
 
-        painter.setPen(QPen(QColor(91, 192, 190, 135), 1))
-        for index, peak in enumerate(self._waveform_envelope):
+        self._draw_channel(
+            painter,
+            width,
+            margin,
+            self._waveform_left,
+            center - (max_half_height * 0.58),
+            max_half_height * 0.45,
+            QColor(91, 192, 190, 180),
+        )
+        self._draw_channel(
+            painter,
+            width,
+            margin,
+            self._waveform_right,
+            center + (max_half_height * 0.58),
+            max_half_height * 0.45,
+            QColor(255, 154, 31, 180),
+        )
+
+    def _draw_channel(
+        self,
+        painter: QPainter,
+        width: int,
+        margin: int,
+        channel: list[float],
+        center_y: float,
+        max_half_height: float,
+        color: QColor,
+    ) -> None:
+        if not channel:
+            return
+
+        canvas_width = width - 2 * margin
+        sample_count = len(channel)
+        if canvas_width <= 0 or sample_count == 0:
+            return
+
+        painter.setPen(QPen(color, 1))
+        for index, peak in enumerate(channel):
             x = margin + (index / max(1, sample_count - 1)) * canvas_width
             clamped = min(max(peak, 0.0), 1.0)
             half_height = max(1.0, clamped * max_half_height)
-            painter.drawLine(int(x), int(center - half_height), int(x), int(center + half_height))
+            painter.drawLine(int(x), int(center_y - half_height), int(x), int(center_y + half_height))
 
     def _draw_candidates(self, painter: QPainter, width: int, height: int, margin: int) -> None:
         if not self._boundary.candidates:
@@ -474,16 +512,27 @@ class _WaveformCanvas(QFrame):
 
         for index, timestamp in enumerate(self._boundary_times):
             x = margin + (timestamp / self._duration) * canvas_width
-            tab_rect = QRectF(x - 18, 2, 36, 16)
-            self._tab_hitboxes.append(tab_rect)
+            top_rect = QRectF(x - self.TAB_HALF_WIDTH, 2, self.TAB_HALF_WIDTH * 2, self.TAB_HEIGHT)
+            bottom_rect = QRectF(
+                x - self.TAB_HALF_WIDTH,
+                height - self.TAB_HEIGHT - 2,
+                self.TAB_HALF_WIDTH * 2,
+                self.TAB_HEIGHT,
+            )
+            self._tab_hitboxes.append((index, top_rect))
+            self._tab_hitboxes.append((index, bottom_rect))
             is_selected = index == self._selected_index
-            painter.fillRect(tab_rect, QColor("#ff9a1f") if is_selected else QColor("#556270"))
+            fill = QColor("#ff9a1f") if is_selected else QColor("#556270")
             painter.setPen(QPen(QColor("#111111") if is_selected else QColor("#d0d7de"), 1))
-            painter.drawRect(tab_rect)
-            painter.drawText(tab_rect.adjusted(4, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, f"T{index + 1}")
+            painter.fillRect(top_rect, fill)
+            painter.fillRect(bottom_rect, fill)
+            painter.drawRect(top_rect)
+            painter.drawRect(bottom_rect)
+            painter.drawText(top_rect, Qt.AlignmentFlag.AlignCenter, f"T{index + 1}")
+            painter.drawText(bottom_rect, Qt.AlignmentFlag.AlignCenter, f"T{index + 1}")
 
             painter.setPen(QPen(QColor("#ff9a1f") if is_selected else QColor("#768390"), 2 if is_selected else 1))
-            painter.drawLine(int(x), 20, int(x), height - 20)
+            painter.drawLine(int(x), int(top_rect.bottom()), int(x), int(bottom_rect.top()))
 
     def _draw_playhead(self, painter: QPainter, width: int, height: int, margin: int) -> None:
         if self._playhead_timestamp is None:
@@ -517,6 +566,22 @@ class _WaveformCanvas(QFrame):
             return 0.0
         normalized = (x_pos - self.MARGIN) / canvas_width
         return self._clamp_timestamp(normalized * self._duration)
+
+    def _set_waveform_envelope(self, waveform_envelope: list[float] | list[tuple[float, float]] | None) -> None:
+        if not waveform_envelope:
+            self._waveform_left = []
+            self._waveform_right = []
+            return
+
+        first = waveform_envelope[0]
+        if isinstance(first, (tuple, list)) and len(first) >= 2:
+            self._waveform_left = [float(item[0]) for item in waveform_envelope]
+            self._waveform_right = [float(item[1]) for item in waveform_envelope]
+            return
+
+        mono = [float(value) for value in waveform_envelope]
+        self._waveform_left = mono
+        self._waveform_right = list(mono)
 
 
 def _format_time(seconds: float) -> str:

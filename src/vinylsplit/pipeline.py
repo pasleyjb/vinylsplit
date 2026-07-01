@@ -252,18 +252,20 @@ class Pipeline:
         self.review_session = session
         return session
 
-    def split(self, filename: str, output_directory: str) -> list[SplitTrack]:
+    def split(self, filename: str, output_directory: str, output_format: str = "flac") -> list[SplitTrack]:
         boundaries = self.analyze(filename)
         return self.splitter.split(
             filename=filename,
             boundaries=boundaries,
             output_directory=output_directory,
+            output_format=output_format,
         )
 
     async def process(
         self,
         filename: str,
         output_directory: str,
+        output_format: str = "flac",
         artist: str | None = None,
         album: str | None = None,
         review_session: AdaptiveReviewState | None = None,
@@ -402,6 +404,7 @@ class Pipeline:
                 filename=filename,
                 boundaries=boundaries,
                 output_directory=str(album_folder),
+                output_format=output_format,
                 total_callback=set_write_total,
                 track_callback=track_written,
             )
@@ -592,7 +595,8 @@ class Pipeline:
                         chosen_title = match.title
 
                 if chosen_title:
-                    new_name = f"{track.track_number:02d} - {sanitize_filename(chosen_title)}.flac"
+                    track_extension = track.path.suffix or ".flac"
+                    new_name = f"{track.track_number:02d} - {sanitize_filename(chosen_title)}{track_extension}"
                     new_path = track.path.with_name(new_name)
                     try:
                         track.path.rename(new_path)
@@ -604,40 +608,68 @@ class Pipeline:
                     # Keep generic name (already written as NN Track.flac)
                     dashboard.set_status("Left generic name", "warning")
 
-                # Write tags for every exported FLAC when metadata is available
+                # Write tags where format support is available.
                 try:
-                    audio = FLAC(str(track.path))
+                    suffix = track.path.suffix.lower()
+                    if suffix == ".flac":
+                        audio = FLAC(str(track.path))
 
-                    # Title
-                    if chosen_title:
-                        audio["title"] = chosen_title
+                        # Title
+                        if chosen_title:
+                            audio["title"] = chosen_title
+                        else:
+                            audio.setdefault("title", [f"Track {track.track_number}"])
+
+                        # Album-level metadata
+                        if album:
+                            audio["album"] = album.album
+                            audio["artist"] = album.artist
+                            if album.year:
+                                audio["date"] = album.year
+                            if album.release_id:
+                                audio["musicbrainz_releaseid"] = album.release_id
+                        else:
+                            # Populate from per-track match if available
+                            match = match_by_number.get(track.track_number)
+                            if match:
+                                if match.album:
+                                    audio["album"] = match.album
+                                if match.artist:
+                                    audio["artist"] = match.artist
+                                if match.year:
+                                    audio["date"] = match.year
+
+                        # Track numbers
+                        audio["tracknumber"] = str(track.track_number)
+                        audio["totaltracks"] = str(total_tracks)
+
+                        audio.save()
                     else:
-                        audio.setdefault("title", [f"Track {track.track_number}"])
+                        audio = MutagenFile(str(track.path), easy=True)
+                        if audio is None:
+                            raise ValueError("Tagging is unavailable for this output format")
 
-                    # Album-level metadata
-                    if album:
-                        audio["album"] = album.album
-                        audio["artist"] = album.artist
-                        if album.year:
-                            audio["date"] = album.year
-                        if album.release_id:
-                            audio["musicbrainz_releaseid"] = album.release_id
-                    else:
-                        # Populate from per-track match if available
-                        match = match_by_number.get(track.track_number)
-                        if match:
-                            if match.album:
-                                audio["album"] = match.album
-                            if match.artist:
-                                audio["artist"] = match.artist
-                            if match.year:
-                                audio["date"] = match.year
+                        title_value = chosen_title or f"Track {track.track_number}"
+                        audio["title"] = [title_value]
 
-                    # Track numbers
-                    audio["tracknumber"] = str(track.track_number)
-                    audio["totaltracks"] = str(total_tracks)
+                        if album:
+                            audio["album"] = [album.album]
+                            audio["artist"] = [album.artist]
+                            if album.year:
+                                audio["date"] = [album.year]
+                        else:
+                            match = match_by_number.get(track.track_number)
+                            if match:
+                                if match.album:
+                                    audio["album"] = [match.album]
+                                if match.artist:
+                                    audio["artist"] = [match.artist]
+                                if match.year:
+                                    audio["date"] = [match.year]
 
-                    audio.save()
+                        audio["tracknumber"] = [str(track.track_number)]
+                        audio.save()
+
                     dashboard.set_status("Tagged", "success")
                 except Exception as exc:
                     dashboard.set_status(f"Tagging failed: {exc}", "warning")

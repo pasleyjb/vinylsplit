@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ except Exception:  # pragma: no cover - fallback for local import variations
     ApplicationContext = Any  # type: ignore[assignment]
 
 from vinylsplit.application.services.review_mapper import map_session_to_dto
+from vinylsplit.gui.dialogs.startup_wizard_dialog import StartupWizardSelection
 
 try:
     from vinylsplit.gui.dialogs.review_dialog import ReviewDialog
@@ -50,6 +52,8 @@ class FocusedStep(Enum):
 class FocusedWorkspace(QWidget):
     state_changed = Signal(object)
     _LAST_UPLOAD_DIR_KEY = "focused/lastUploadDirectory"
+    _PREFERRED_OUTPUT_DIR_KEY = "focused/preferredOutputDirectory"
+    _PREFERRED_OUTPUT_FORMAT_KEY = "focused/preferredOutputFormat"
 
     def __init__(self, app_context: ApplicationContext, state: WorkspaceViewState | None = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -67,7 +71,9 @@ class FocusedWorkspace(QWidget):
         self._export_worker: _FocusedExportWorker | None = None
         self._workspace_manager: Any | None = None
         self._active_review_dialog: QWidget | None = None
+        self._embedded_review_editor: ReviewDialog | None = None
         self._settings = QSettings()
+        self._last_output_directory = self._preferred_output_directory()
 
         self._auto_analyze_check = QCheckBox("Automatically analyze")
         self._auto_review_check = QCheckBox("Open review only when needed")
@@ -92,9 +98,9 @@ class FocusedWorkspace(QWidget):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(14)
 
-        title = QLabel("Focused")
+        title = QLabel("VinylSplit")
         title.setObjectName("focusedTitle")
-        subtitle = QLabel("Drop one recording here and VinylSplit will archive it for you.")
+        subtitle = QLabel("Load one recording, review boundaries, refine edits, and export from this workspace.")
         subtitle.setWordWrap(True)
 
         root.addWidget(title)
@@ -170,6 +176,20 @@ class FocusedWorkspace(QWidget):
         self._summary_label = QLabel("No album loaded.")
         self._summary_label.setWordWrap(True)
         root.addWidget(self._summary_label)
+
+        self._review_editor_card = QFrame()
+        self._review_editor_card.setObjectName("Card")
+        self._review_editor_layout = QVBoxLayout(self._review_editor_card)
+        self._review_editor_layout.setContentsMargins(12, 12, 12, 12)
+        self._review_editor_layout.setSpacing(8)
+        self._review_editor_placeholder = QLabel(
+            "Boundary editor will appear here after analysis completes."
+        )
+        self._review_editor_placeholder.setObjectName("StatusBarText")
+        self._review_editor_placeholder.setWordWrap(True)
+        self._review_editor_layout.addWidget(self._review_editor_placeholder)
+        root.addWidget(self._review_editor_card, stretch=2)
+
         root.addStretch(1)
 
         self._progress_card.hide()
@@ -180,6 +200,26 @@ class FocusedWorkspace(QWidget):
 
     def set_workspace_manager(self, manager: Any) -> None:
         self._workspace_manager = manager
+
+    def set_preferred_output_directory(self, output_directory: str | None) -> None:
+        self._last_output_directory = output_directory or None
+        if self._last_output_directory:
+            self._settings.setValue(self._PREFERRED_OUTPUT_DIR_KEY, self._last_output_directory)
+        else:
+            self._settings.remove(self._PREFERRED_OUTPUT_DIR_KEY)
+        self._sync_state_from_model()
+
+    def set_preferred_output_format(self, output_format: str | None) -> None:
+        normalized = (output_format or "").strip().lower()
+        if normalized in {"flac", "wav", "mp3"}:
+            self._settings.setValue(self._PREFERRED_OUTPUT_FORMAT_KEY, normalized)
+
+    def begin_startup_flow(self, selection: StartupWizardSelection) -> None:
+        self.set_preferred_output_directory(selection.output_directory)
+        self.set_preferred_output_format(selection.output_format)
+        self._on_file_selected(selection.recording_path)
+        if self._analyze_thread is None:
+            self._begin_automatic_archive()
 
     def _sync_state_from_model(self) -> None:
         recording_path = getattr(self._state, "recording_path", None)
@@ -266,6 +306,7 @@ class FocusedWorkspace(QWidget):
             pass
 
         self._clear_artwork_preview()
+        self._clear_embedded_review_editor()
         self._set_state_field("recording_path", file_path)
         self._set_state_field("recording_info", Path(file_path).name)
         self._apply_embedded_metadata_hint(file_path)
@@ -419,20 +460,7 @@ class FocusedWorkspace(QWidget):
         self._ui_step = FocusedStep.REVIEW_RECOMMENDED
         self._set_progress_visible(False)
         self._emit_state_change()
-
-        should_review = (not self._auto_review_check.isChecked()) or confidence < self._review_threshold_value()
-        should_split = self._auto_split_check.isChecked() and not should_review
-
-        if should_review:
-            self._open_review_dialog()
-            return
-
-        if should_split:
-            self._start_export()
-            return
-
-        self._ui_step = FocusedStep.READY_TO_SPLIT
-        self._sync_action_buttons()
+        self._show_embedded_review_editor()
 
     @Slot(str)
     def _on_analysis_failed(self, message: str) -> None:
@@ -453,6 +481,11 @@ class FocusedWorkspace(QWidget):
         self._sync_action_buttons()
 
     def _open_review_dialog(self) -> None:
+        if self._embedded_review_editor is not None:
+            self._embedded_review_editor.show()
+            self._embedded_review_editor.raise_()
+            return
+
         if ReviewDialog is None:
             self._set_state_field("status_message", "Review dialog is unavailable in this build.")
             self._emit_state_change()
@@ -476,6 +509,62 @@ class FocusedWorkspace(QWidget):
 
         if self._auto_split_check.isChecked():
             self._start_export()
+
+    def _show_embedded_review_editor(self) -> None:
+        if ReviewDialog is None:
+            self._set_state_field("status_message", "Review editor is unavailable in this build.")
+            self._emit_state_change()
+            return
+
+        dialog = self._build_review_dialog()
+        if dialog is None:
+            self._set_state_field("status_message", "Review editor could not be opened.")
+            self._emit_state_change()
+            return
+
+        self._clear_embedded_review_editor()
+
+        dialog.setModal(False)
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setWindowFlags(Qt.WindowType.Widget)
+        dialog.setParent(self._review_editor_card)
+        dialog.accepted.connect(self._on_embedded_review_accepted)
+        dialog.rejected.connect(self._on_embedded_review_rejected)
+        self._review_editor_layout.addWidget(dialog)
+        dialog.show()
+
+        self._embedded_review_editor = dialog
+        self._set_state_field("review_state", "In progress")
+        self._set_state_field("status_message", "Review editor ready. Adjust boundaries and export when ready.")
+        self._sync_action_buttons()
+        self._emit_state_change()
+
+    def _clear_embedded_review_editor(self) -> None:
+        if self._embedded_review_editor is not None:
+            self._embedded_review_editor.setParent(None)
+            self._embedded_review_editor.deleteLater()
+            self._embedded_review_editor = None
+
+        while self._review_editor_layout.count() > 1:
+            item = self._review_editor_layout.takeAt(1)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _on_embedded_review_accepted(self) -> None:
+        self._set_state_field("review_state", "Completed")
+        self._ui_step = FocusedStep.READY_TO_SPLIT
+        self._set_state_field("status_message", "Review accepted. Ready to export.")
+        self._sync_action_buttons()
+        self._emit_state_change()
+
+    def _on_embedded_review_rejected(self) -> None:
+        self._set_state_field("review_state", "Requested")
+        self._ui_step = FocusedStep.REVIEW_RECOMMENDED
+        self._set_state_field("status_message", "Review closed. Reopen editor to continue refining boundaries.")
+        self._sync_action_buttons()
+        self._emit_state_change()
 
     def _build_review_dialog(self) -> QWidget | None:
         recording_path = getattr(self._state, "recording_path", None)
@@ -507,11 +596,13 @@ class FocusedWorkspace(QWidget):
         if not recording_path:
             return
 
-        output_directory = self._last_output_directory or QFileDialog.getExistingDirectory(self, "Choose output folder")
+        output_directory = self._last_output_directory or self._preferred_output_directory()
+        if not output_directory:
+            output_directory = QFileDialog.getExistingDirectory(self, "Choose output folder")
         if not output_directory:
             return
 
-        self._last_output_directory = output_directory
+        self.set_preferred_output_directory(output_directory)
         self._set_state_field("status_message", "Archiving your album...")
         self._set_state_field("progress_label", "Splitting")
         self._set_state_field("progress_value", 15)
@@ -524,6 +615,8 @@ class FocusedWorkspace(QWidget):
             recording_path,
             output_directory,
             self._auto_artwork_check.isChecked(),
+            getattr(self._review_session, "session", self._review_session),
+            self._preferred_output_format(),
         )
         self._export_worker.moveToThread(self._export_thread)
         self._export_thread.started.connect(self._export_worker.run)
@@ -547,7 +640,13 @@ class FocusedWorkspace(QWidget):
     def _on_export_complete(self, payload: object) -> None:
         data = payload if isinstance(payload, dict) else {}
         output_directory = data.get("output_directory") or self._last_output_directory
-        exported_tracks = data.get("exported_tracks") or []
+        exported_tracks_raw = data.get("exported_tracks")
+        if isinstance(exported_tracks_raw, int):
+            exported_tracks_count = exported_tracks_raw
+        elif isinstance(exported_tracks_raw, (list, tuple, set)):
+            exported_tracks_count = len(exported_tracks_raw)
+        else:
+            exported_tracks_count = 0
         self._set_state_field("analysis_state", "Complete")
         self._set_state_field("review_state", "Completed")
         self._set_state_field("progress_label", "Archive complete")
@@ -560,8 +659,8 @@ class FocusedWorkspace(QWidget):
         if output_directory:
             self._last_output_directory = str(output_directory)
 
-        if exported_tracks:
-            self._set_state_field("recording_info", f"Archive complete: {len(exported_tracks)} tracks saved.")
+        if exported_tracks_count > 0:
+            self._set_state_field("recording_info", f"Archive complete: {exported_tracks_count} tracks saved.")
         self._sync_action_buttons()
 
     @Slot(str)
@@ -583,15 +682,18 @@ class FocusedWorkspace(QWidget):
     def _open_output_folder(self) -> None:
         output_directory = self._last_output_directory
         if not output_directory:
+            output_directory = self._preferred_output_directory()
+        if not output_directory:
             output_directory = QFileDialog.getExistingDirectory(self, "Choose output folder")
             if not output_directory:
                 return
-            self._last_output_directory = output_directory
+            self.set_preferred_output_directory(output_directory)
 
         QDesktopServices.openUrl(QUrl.fromLocalFile(output_directory))
 
     def _reset_for_next_album(self) -> None:
         self._clear_artwork_preview()
+        self._clear_embedded_review_editor()
         self._set_state_field("recording_path", None)
         self._set_state_field("recording_info", None)
         self._set_state_field("album_artist", None)
@@ -612,11 +714,10 @@ class FocusedWorkspace(QWidget):
         has_recording = bool(getattr(self._state, "recording_path", None))
         busy = self._analyze_thread is not None or self._export_thread is not None
         has_tracks = bool(tuple(getattr(self._state, "track_list", ()) or ()))
-        review_complete = getattr(self._state, "review_state", "") == "Completed"
 
         self._archive_button.setEnabled(has_recording and not busy)
         self._review_button.setEnabled(has_tracks and not busy)
-        self._split_button.setEnabled(has_tracks and (review_complete or self._auto_split_check.isChecked()) and not busy)
+        self._split_button.setEnabled(has_tracks and not busy)
         self._open_output_button.setEnabled(bool(self._last_output_directory))
         self._archive_again_button.setEnabled(self._ui_step is FocusedStep.ARCHIVE_COMPLETE)
 
@@ -651,6 +752,18 @@ class FocusedWorkspace(QWidget):
     def _on_review_threshold_changed(self, index: int) -> None:
         self._set_state_field("focused_review_threshold", self._review_threshold_combo.currentText())
 
+    def _preferred_output_directory(self) -> str | None:
+        value = self._settings.value(self._PREFERRED_OUTPUT_DIR_KEY, "")
+        cleaned = str(value or "").strip()
+        return cleaned or None
+
+    def _preferred_output_format(self) -> str:
+        value = self._settings.value(self._PREFERRED_OUTPUT_FORMAT_KEY, "flac")
+        cleaned = str(value or "flac").strip().lower()
+        if cleaned not in {"flac", "wav", "mp3"}:
+            return "flac"
+        return cleaned
+
     def _set_state_field(self, name: str, value: Any) -> None:
         try:
             setattr(self._state, name, value)
@@ -671,6 +784,7 @@ class FocusedWorkspace(QWidget):
         if dialog is not None:
             dialog.close()
         self._active_review_dialog = None
+        self._clear_embedded_review_editor()
 
     def _shutdown_background_threads(self) -> None:
         for thread in (self._analyze_thread, self._export_thread):
@@ -753,33 +867,43 @@ class _FocusedExportWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, app_context: ApplicationContext, recording_path: str, output_directory: str, fetch_artwork: bool) -> None:
+    def __init__(
+        self,
+        app_context: ApplicationContext,
+        recording_path: str,
+        output_directory: str,
+        fetch_artwork: bool,
+        review_session: Any | None,
+        output_format: str,
+    ) -> None:
         super().__init__()
         self._app_context = app_context
         self._recording_path = recording_path
         self._output_directory = output_directory
         self._fetch_artwork = fetch_artwork
+        self._review_session = review_session
+        self._output_format = output_format
 
     @Slot()
     def run(self) -> None:
+        def on_progress(event: Any) -> None:
+            completed = int(getattr(event, "completed", 0) or 0)
+            total = int(getattr(event, "total", 0) or 0)
+            description = str(getattr(event, "description", "Exporting"))
+            self.progress.emit(completed, total, description)
+
         try:
             self.progress.emit(1, 3, "Splitting audio...")
-            process_fn = None
-            for candidate_name in ("process_controller", "pipeline", "split_controller"):
-                candidate = getattr(self._app_context, candidate_name, None)
-                if candidate is None:
-                    continue
-                process_fn = getattr(candidate, "process", None)
-                if process_fn is not None:
-                    break
-
-            exported_tracks: list[str] = []
-            if callable(process_fn):
-                try:
-                    result = process_fn(self._recording_path, self._output_directory)
-                except TypeError:
-                    result = process_fn(self._recording_path, output_directory=self._output_directory)
-                exported_tracks = list(getattr(result, "exported_tracks", []) or [])
+            result = asyncio.run(
+                self._app_context.export_controller.export(
+                    filename=self._recording_path,
+                    output_directory=self._output_directory,
+                    review_session=self._review_session,
+                    progress_callback=on_progress,
+                    output_format=self._output_format,
+                )
+            )
+            exported_tracks = int(getattr(result, "exported_tracks", 0) or 0)
 
             if self._fetch_artwork:
                 for candidate_name in ("artwork_service", "coverart_service"):

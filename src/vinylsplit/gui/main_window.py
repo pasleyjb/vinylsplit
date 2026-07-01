@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from vinylsplit.application import ApplicationContext
 from vinylsplit.gui.dialogs import PlaybackSettingsDialog
+from vinylsplit.gui.dialogs.startup_wizard_dialog import StartupWizardSelection
 from vinylsplit.gui.theme import ThemeManager
 from vinylsplit.gui.workspaces import FocusedWorkspace
 
@@ -78,6 +79,11 @@ class MainWindow(QMainWindow):
         dialog = PlaybackSettingsDialog(current_mode=self._theme_manager.mode, parent=self)
         if dialog.exec() == PlaybackSettingsDialog.DialogCode.Accepted:
             self._theme_manager.apply_mode(dialog.selected_mode())
+            self._focused_workspace.set_preferred_output_directory(dialog.selected_output_directory())
+            self._focused_workspace.set_preferred_output_format(dialog.selected_output_format())
+
+    def begin_startup_flow(self, selection: StartupWizardSelection) -> None:
+        self._focused_workspace.begin_startup_flow(selection)
 
     def _animate_workspace_transition(self, _workspace_id: str) -> None:
         """Apply subtle crossfade transition between workspace views."""
