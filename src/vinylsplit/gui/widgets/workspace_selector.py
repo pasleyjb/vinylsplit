@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QComboBox
 
 
 class WorkspaceSelector(QComboBox):
-    """Selector for switching between Focused and Studio workspaces."""
+    """Selector for switching workspace views."""
 
     workspace_selected = Signal(str)
 
@@ -13,7 +13,6 @@ class WorkspaceSelector(QComboBox):
         super().__init__(parent)
         self.setObjectName("WorkspaceSelector")
         self.addItem("Focused", "focused")
-        self.addItem("Studio", "studio")
         self.currentIndexChanged.connect(self._emit_selection)
 
     def set_workspace(self, workspace_id: str) -> None:

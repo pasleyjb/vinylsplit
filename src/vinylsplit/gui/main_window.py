@@ -18,13 +18,11 @@ from PySide6.QtWidgets import (
 from vinylsplit.application import ApplicationContext
 from vinylsplit.gui.dialogs import PlaybackSettingsDialog
 from vinylsplit.gui.theme import ThemeManager
-from vinylsplit.gui.workspace_manager import WorkspaceManager
-from vinylsplit.gui.workspaces import FocusedWorkspace, StudioWorkspace
-from vinylsplit.gui.widgets.workspace_selector import WorkspaceSelector
+from vinylsplit.gui.workspaces import FocusedWorkspace
 
 
 class MainWindow(QMainWindow):
-    """Top-level desktop shell hosting Focused and Studio workspaces."""
+    """Top-level desktop shell hosting the Focused workspace."""
 
     _SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".flac", ".aiff", ".aif", ".ogg", ".mp3"}
 
@@ -39,7 +37,7 @@ class MainWindow(QMainWindow):
         self._theme_manager = theme_manager
         self.setAcceptDrops(True)
 
-        self.setWindowTitle("VinylSplit Studio")
+        self.setWindowTitle("VinylSplit")
         self.resize(1280, 860)
         self.setMinimumSize(1024, 720)
 
@@ -52,9 +50,6 @@ class MainWindow(QMainWindow):
         header.setSpacing(10)
         header.addStretch(1)
 
-        self._workspace_selector = WorkspaceSelector()
-        header.addWidget(self._workspace_selector, alignment=Qt.AlignmentFlag.AlignRight)
-
         self._settings_button = QPushButton("Settings")
         self._settings_button.clicked.connect(self._open_playback_settings)
         header.addWidget(self._settings_button)
@@ -62,24 +57,14 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
 
         self._focused_workspace = FocusedWorkspace(app_context=self._app_context)
-        self._studio_workspace = StudioWorkspace(app_context=self._app_context)
-
-        self._workspace_manager = WorkspaceManager(
-            stack=self._stack,
-            focused_workspace=self._focused_workspace,
-            studio_workspace=self._studio_workspace,
-        )
-
-        self._workspace_selector.workspace_selected.connect(self._workspace_manager.switch_to)
-        self._workspace_manager.workspace_changed.connect(self._workspace_selector.set_workspace)
-        self._workspace_manager.workspace_changed.connect(self._animate_workspace_transition)
+        self._stack.addWidget(self._focused_workspace)
+        self._stack.setCurrentWidget(self._focused_workspace)
         self._theme_manager.appearance_applied.connect(self._animate_theme_transition)
 
         layout.addLayout(header)
         layout.addWidget(self._stack, stretch=1)
 
         self.setCentralWidget(root)
-        self._workspace_selector.set_workspace("focused")
 
         self._opacity_effect = QGraphicsOpacityEffect(self._stack)
         self._stack.setGraphicsEffect(self._opacity_effect)
@@ -139,11 +124,7 @@ class MainWindow(QMainWindow):
                 and path.is_file()
                 and path.suffix.lower() in self._SUPPORTED_AUDIO_EXTENSIONS
             ):
-                active_workspace = self._workspace_manager.state.active_workspace
-                if active_workspace == "studio":
-                    self._studio_workspace.load_recording(str(path))
-                else:
-                    self._focused_workspace.load_recording(str(path))
+                self._focused_workspace.load_recording(str(path))
                 event.acceptProposedAction()
                 return
 
