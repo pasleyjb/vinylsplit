@@ -3,7 +3,6 @@
 import asyncio
 import time
 from collections import Counter
-from typing import cast
 
 from vinylsplit.metadata_verifier.models import (
     MetadataContext,

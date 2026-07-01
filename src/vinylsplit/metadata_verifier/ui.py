@@ -2,16 +2,13 @@
 
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 
 from vinylsplit.metadata_verifier.models import (
     MetadataConflict,
-    MetadataEvidence,
     ReleaseEvidenceSet,
     VerificationReport,
 )
 from vinylsplit.ui.console import console
-from vinylsplit.ui.theme import VINYLSPLIT_THEME
 
 
 def display_verification_report(report: VerificationReport) -> None:
@@ -22,7 +19,7 @@ def display_verification_report(report: VerificationReport) -> None:
                 "[warning]No metadata found[/warning]\n\n"
                 "All evidence sources failed or returned no results.",
                 title="Metadata Verification",
-                style=THEME["warning_border"],
+                border_style="warning",
                 expand=False,
             )
         )
@@ -50,12 +47,6 @@ def display_verification_report(report: VerificationReport) -> None:
     )
 
     # Determine styling based on recommendation severity
-    border_style = {
-        "clean": "green",
-        "warning": "yellow",
-        "conflict": "red",
-    }[report.recommendation_severity]
-
     # Create panel with appropriate border color
     panel_border_color = {
         "clean": "green",

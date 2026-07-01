@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+from vinylsplit.application.dto.review import ReviewSessionDTO
+from vinylsplit.application.dto.review_result import ReviewResult
+from vinylsplit.application.interfaces.services import ReviewServiceInterface
+
+
+class ReviewController:
+    """Translate presentation requests into review service calls."""
+
+    def __init__(self, review_service: ReviewServiceInterface) -> None:
+        self._review_service = review_service
+
+    def review(
+        self,
+        filename: str,
+        expected_track_count: int | None = None,
+        expected_boundary_times: tuple[float, ...] | None = None,
+        diagnostics: bool = False,
+    ) -> ReviewResult:
+        """Create a review session from a source recording."""
+
+        return self._review_service.review(
+            filename=filename,
+            expected_track_count=expected_track_count,
+            expected_boundary_times=expected_boundary_times,
+            diagnostics=diagnostics,
+        )
+
+    def get_session_dto(self) -> ReviewSessionDTO | None:
+        """Return current review session as DTO when supported by the service."""
+
+        get_session = getattr(self._review_service, "get_session_dto", None)
+        if callable(get_session):
+            return get_session()
+        return None

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import soundfile as sf
 
-from vinylsplit.detection import TrackBoundary
+from vinylsplit.models import Boundary
 
 
 @dataclass
@@ -20,20 +20,32 @@ class SplitTrack:
 class TrackSplitter:
     """Split a recording into individual tracks."""
 
+    _FORMAT_MAP = {
+        "flac": ("FLAC", ".flac"),
+        "wav": ("WAV", ".wav"),
+        "mp3": ("MP3", ".mp3"),
+    }
+
     def split(
         self,
         filename: str,
-        boundaries: list[TrackBoundary],
+        boundaries: list[Boundary],
         output_directory: str,
+        output_format: str = "flac",
         total_callback: Callable[[int], None] | None = None,
         track_callback: Callable[[SplitTrack], None] | None = None,
     ) -> list[SplitTrack]:
         """
-        Split an audio recording into separate FLAC files.
+        Split an audio recording into separate files.
 
         Audio quality is preserved because samples are copied directly
         from the original recording.
         """
+
+        normalized_format = output_format.strip().lower()
+        if normalized_format not in self._FORMAT_MAP:
+            raise ValueError(f"Unsupported output format: {output_format}")
+        writer_format, extension = self._FORMAT_MAP[normalized_format]
 
         source = Path(filename)
 
@@ -74,7 +86,7 @@ class TrackSplitter:
             if end_sample <= start_sample:
                 continue
 
-            output_path = output / f"{boundary.track_number:02d} Track.flac"
+            output_path = output / f"{boundary.track_number:02d} Track{extension}"
 
             pending_tracks.append(
                 SplitTrack(
@@ -107,7 +119,7 @@ class TrackSplitter:
                 file=str(track.path),
                 data=track_audio,
                 samplerate=samplerate,
-                format="FLAC",
+                format=writer_format,
             )
 
             tracks.append(track)

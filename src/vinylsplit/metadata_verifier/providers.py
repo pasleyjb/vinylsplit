@@ -1,7 +1,6 @@
 """Built-in metadata source providers."""
 
 import time
-from pathlib import Path
 
 from vinylsplit.lookup import AlbumLookup
 from vinylsplit.metadata_verifier.models import (
@@ -230,10 +229,6 @@ class FilePropertiesProvider(MetadataSourceProvider):
     async def gather(self, context: MetadataContext) -> MetadataEvidence | None:
         """Extract file properties: track count, duration."""
         try:
-            from mutagen.flac import FLAC
-
-            flac = FLAC(context.source_file)
-
             # Track count from split metadata if available
             track_number = context.split_track.track_number if context.split_track else None
             duration_seconds = context.split_track.end_time - context.split_track.start_time
