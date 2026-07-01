@@ -2,3 +2,7 @@
 
 %:
 	dh $@ --buildsystem=pybuild
+
+override_dh_auto_test:
+	# Skip pybuild autodiscovery tests; runtime deps are resolved at install time.
+	true

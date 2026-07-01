@@ -1,5 +1,5 @@
-vinylsplit (0.9.0-1) unstable; urgency=medium
+vinylsplit (1.0.0~beta1-1) unstable; urgency=medium
 
-  * Initial Debian package.
+  * Beta release packaging refresh.
 
- -- Justin Pasley <you@example.com>  Thu, 18 Jun 2026 20:00:00 -0500
+ -- Justin Pasley <you@example.com>  Wed, 01 Jul 2026 11:30:00 -0500

@@ -5,6 +5,7 @@ Maintainer: Justin Pasley <you@example.com>
 Build-Depends:
  debhelper-compat (= 13),
  dh-python,
+ pybuild-plugin-pyproject,
  python3-all,
  python3-setuptools,
  python3-build
