@@ -221,7 +221,7 @@ __marimo__/
 # --------------------------------------------------
 
 # Generated analysis images
-*.png
+
 
 # Temporary developer scripts
 plot_*.py
@@ -235,3 +235,19 @@ scratch.py
 Thumbs.db
 # VinylSplit output
 output/
+# Python build artifacts
+.pybuild/
+build/
+dist/
+*.egg-info/
+
+# Debian packaging artifacts
+debian/.debhelper/
+debian/vinylsplit/
+debian/files
+debian/*.substvars
+debian/debhelper-build-stamp
+
+# Bytecode
+__pycache__/
+*.pyc

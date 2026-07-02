@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=VinylSplit
+GenericName=Audio Track Splitter
+Comment=Split vinyl recordings into tagged FLAC tracks
+Exec=vinylsplit-gui
+Icon=vinylsplit
+Terminal=false
+Categories=AudioVideo;Audio;
+Keywords=vinyl;records;music;flac;
+StartupNotify=true
+
