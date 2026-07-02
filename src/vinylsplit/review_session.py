@@ -531,11 +531,13 @@ class ReviewSession:
     # ------------------------------------------------------------------
 
     def _validation(self) -> BoundaryValidationResult:
+        print(f"\nREVIEW DEBUG: expected_track_count = {self._expected_track_count}\n")
+
         return self._validator.validate(
             boundaries=self._state.boundaries,
             duration_seconds=self._duration,
             expected_track_count=self._expected_track_count,
-        )
+    )
 
     def _display_track_title(self, track_number: int, boundary_title: str | None) -> str:
         """Resolve the title displayed in the review table for a track."""

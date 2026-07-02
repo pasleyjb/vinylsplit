@@ -122,21 +122,25 @@ class Pipeline:
                 mb = MusicBrainzService()
                 release_from_hints = mb.search_release(artist, album)
 
-                if release_from_hints and release_from_hints.track_durations_seconds:
-                    expected_track_count = len(release_from_hints.track_durations_seconds)
-                    expected_boundary_times = mb.expected_boundary_times(
-                        release_from_hints.track_durations_seconds
-                    )
+                print(f"LOOKUP DEBUG: release={release_from_hints!r}")
+
+                if release_from_hints:
+                    if release_from_hints.track_durations_seconds:
+                        expected_track_count = len(
+                            release_from_hints.track_durations_seconds
+                        )
+                        expected_boundary_times = mb.expected_boundary_times(
+                            release_from_hints.track_durations_seconds
+                        )
+                    else:
+                        expected_track_count = len(release_from_hints.tracklist)
+
                     dashboard.set_status(
-                        f"Using MusicBrainz duration guidance ({expected_track_count} tracks)",
+                        f"Using MusicBrainz guidance ({expected_track_count} tracks)",
                         "success",
                     )
-                elif release_from_hints:
-                    dashboard.set_status(
-                        "MusicBrainz release found without usable durations (fallback to audio-only)",
-                        "warning",
-                    )
             except Exception as exc:
+                print(f"LOOKUP EXCEPTION: {type(exc).__name__}: {exc}")
                 dashboard.set_status(f"MusicBrainz guidance unavailable: {exc}", "warning")
 
         return expected_track_count, expected_boundary_times, release_from_hints
@@ -232,12 +236,17 @@ class Pipeline:
     ) -> AdaptiveReviewState:
         """Analyze audio and return an adaptive review session."""
 
+        print(f"PIPELINE DEBUG: detector type = {type(self.detector).__name__}")
+        print("PIPELINE DEBUG: calling TrackDetector.detect()")
+
         boundaries = self.detector.detect(
             filename,
             expected_track_count=expected_track_count,
             expected_boundary_times=expected_boundary_times,
             diagnostics=diagnostics,
         )
+
+        print(f"PIPELINE DEBUG: detector returned {len(boundaries)} boundaries")
 
         boundary_list = list(boundaries)
         if boundary_list and boundary_list[0].start_time == 0.0:
@@ -268,6 +277,7 @@ class Pipeline:
         output_format: str = "flac",
         artist: str | None = None,
         album: str | None = None,
+        release: MusicBrainzService.ReleaseMatch | None = None,
         review_session: AdaptiveReviewState | None = None,
         progress_callback: Callable[[str, str, int | None, int | None], None] | None = None,
     ) -> list[tuple[SplitTrack, AlbumMatch]]:
@@ -314,12 +324,24 @@ class Pipeline:
             )
             progress.update("write_tracks", completed=0)
 
-            expected_track_count, expected_boundary_times, release_from_hints = self._lookup_release_guidance(
-                filename,
-                user_artist,
-                user_album,
-                dashboard,
-            )
+            if release is not None:
+                release_from_hints = release
+                expected_track_count = len(release.track_durations_seconds) if release.track_durations_seconds else len(release.tracklist)
+                expected_boundary_times = (
+                    MusicBrainzService().expected_boundary_times(release.track_durations_seconds)
+                    if release.track_durations_seconds else None
+                )
+                dashboard.set_status(
+                    f"Using selected MusicBrainz release ({expected_track_count} tracks)",
+                    "success",
+                )
+            else:
+                expected_track_count, expected_boundary_times, release_from_hints = self._lookup_release_guidance(
+                    filename,
+                    user_artist,
+                    user_album,
+                    dashboard,
+                )
 
             dashboard.set_stage("Analyzing Audio", "Reading audio")
             dashboard.set_status("Analyzing audio")

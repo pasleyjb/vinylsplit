@@ -86,12 +86,21 @@ class TrackDetector:
             expected_boundary_times=expected_boundary_times,
         )
 
+        print("\n=== Metadata Alignment Summary ===")
+        print(f"Expected boundaries: {len(normalized_expected)}")
+        print(f"Silence candidates: {len(candidates)}")
+
         selected_with_alts, confidence_rows = self.select_candidates_for_expected_boundaries(
             candidates=candidates,
             expected_boundary_times=normalized_expected,
             diagnostics=diagnostics,
         )
         self.last_selection_confidence = confidence_rows
+
+        print(f"Selected boundaries: {len(selected_with_alts)}")
+        if len(selected_with_alts) < len(normalized_expected):
+            print(f"MISSING: {len(normalized_expected) - len(selected_with_alts)} expected boundaries could not be matched.")
+        print("==================================\n")
 
         return self.generate_boundaries_from_selected_with_alternatives(selected_with_alts, confidence_rows)
 
@@ -191,6 +200,15 @@ class TrackDetector:
                     silence_duration=length_windows * self.window_seconds,
                 )
             )
+        print("\n=== Candidate Summary ===")
+        print(f"Total candidates: {len(candidates)}")
+        for i, candidate in enumerate(candidates):
+            print(
+                f"{i+1:2d}: "
+                f"{candidate.start_time:8.2f}s  "
+                f"silence={candidate.silence_duration:.2f}s"
+    )
+        print("=========================\n")
 
         return candidates
 

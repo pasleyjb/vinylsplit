@@ -154,20 +154,57 @@ class InteractiveWizard:
         )
 
         try:
-            release = self.musicbrainz.search_release(
+            releases = self.musicbrainz.search_releases(
                 self.selected_artist,
                 self.selected_album,
             )
 
-            if not release:
+            if not releases:
                 self.console.print("[warning]No matching release found in MusicBrainz[/warning]")
                 self.selected_release = None
                 return
+
+            if len(releases) == 1:
+                release = releases[0]
+            else:
+                self.console.print()
+                self.console.print("[bold cyan]Multiple MusicBrainz releases found:[/bold cyan]")
+
+                for index, candidate in enumerate(releases, start=1):
+                    self.console.print(
+                        f"  {index}. {candidate.album} ({candidate.year}) - "
+                        f"{len(candidate.tracklist)} tracks"
+                    )
+
+                while True:
+                    choice = Prompt.ask(
+                        "\nSelect release",
+                        default="1",
+                    )
+
+                    try:
+                        selection = int(choice)
+                    except ValueError:
+                        self.console.print("[warning]Please enter a number.[/warning]")
+                        continue
+
+                    if 1 <= selection <= len(releases):
+                        release = releases[selection - 1]
+                        break
+
+                    self.console.print("[warning]Selection out of range.[/warning]")
 
             self.selected_release = release
             self.console.print(
                 f"[success]Found:[/success] {release.album} ({release.year}) - {len(release.tracklist)} tracks"
             )
+
+            if len(release.tracklist) >= 16:
+                self.console.print()
+                self.console.print(
+                    "[yellow]Note:[/yellow] This appears to be a reissue or expanded edition. "
+                    "Support for selecting between multiple MusicBrainz releases is the next planned improvement."
+                )
         except Exception as e:
             self.console.print(f"[error]Search failed:[/error] {e}")
             self.selected_release = None
@@ -235,6 +272,7 @@ class InteractiveWizard:
                     output_directory=output_dir,
                     artist=self.selected_artist,
                     album=self.selected_album,
+                    release=self.selected_release,
                 )
             )
 

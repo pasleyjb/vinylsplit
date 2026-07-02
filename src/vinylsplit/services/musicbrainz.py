@@ -334,6 +334,88 @@ class MusicBrainzService:
             track_durations_seconds=track_durations_seconds,
         )
 
+
+    def search_releases(
+        self,
+        artist: str | None,
+        album: str | None,
+    ) -> list[ReleaseMatch]:
+        """
+        Return multiple ranked release candidates.
+
+        This is the first step toward interactive release selection.
+        It queries MusicBrainz once, builds ReleaseMatch objects for the
+        best candidates, removes duplicate releases, and returns them
+        sorted by year then track count.
+        """
+
+        if not artist and not album:
+            return []
+
+        query_parts: list[str] = []
+        if album:
+            query_parts.append(f'release:"{album}"')
+        if artist:
+            query_parts.append(f'artist:"{artist}"')
+
+        response = requests.get(
+            f"{self.URL}/release",
+            params={
+                "query": " AND ".join(query_parts),
+                "fmt": "json",
+                "limit": 10,
+            },
+            headers=self.HEADERS,
+            timeout=30,
+        )
+        response.raise_for_status()
+
+        releases: list[MusicBrainzService.ReleaseMatch] = []
+        seen: set[tuple[str, str, int]] = set()
+
+        for candidate in response.json().get("releases", []):
+            rid = candidate.get("id")
+            if not rid:
+                continue
+
+            try:
+                full = requests.get(
+                    f"{self.URL}/release/{rid}",
+                    params={"fmt": "json", "inc": "recordings+artists"},
+                    headers=self.HEADERS,
+                    timeout=30,
+                ).json()
+            except Exception:
+                continue
+
+            tracklist, durations = self._extract_track_titles_and_durations(full.get("media", []))
+            artist_name = "Unknown Artist"
+            credits = full.get("artist-credit", [])
+            if credits:
+                artist_name = credits[0]["artist"]["name"]
+
+            year = (full.get("date") or "----")[:4]
+            title = full.get("title", "")
+
+            key = (title.lower(), year, len(tracklist))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            releases.append(
+                MusicBrainzService.ReleaseMatch(
+                    release_id=rid,
+                    artist=artist_name,
+                    album=title,
+                    year=year,
+                    tracklist=tracklist,
+                    track_durations_seconds=durations,
+                )
+            )
+
+        releases.sort(key=lambda r: (r.year if r.year.isdigit() else "9999", len(r.tracklist)))
+        return releases
+
     def _extract_track_titles_and_durations(
         self,
         media: list[dict],
